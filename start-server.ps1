@@ -381,25 +381,45 @@ if ($isWindows) {
     & $venvPython -m pip install dlib-bin --quiet 2>$null
 }
 
-# Install face_recognition_models from git (PyPI version may be broken)
-Write-Step 'Installing face_recognition_models from git...'
-& $venvPython -m pip install "git+https://github.com/ageitgey/face_recognition_models" --quiet
-if ($LASTEXITCODE -ne 0) {
-    Write-Warn 'git install failed, trying PyPI...'
-    & $venvPython -m pip install face-recognition-models --quiet
+# Check if face_recognition_models is installed
+$modelsInstalled = & $venvPython -m pip show face-recognition-models 2>$null
+if (-not $modelsInstalled) {
+    Write-Step 'face_recognition_models NOT installed. Installing from git...'
+    & $venvPython -m pip install --force-reinstall "git+https://github.com/ageitgey/face_recognition_models" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn 'git install failed. Trying without --force-reinstall...'
+        & $venvPython -m pip install "git+https://github.com/ageitgey/face_recognition_models" 2>&1
+    }
+    # Verify it installed
+    $modelsInstalled = & $venvPython -m pip show face-recognition-models 2>$null
+    if (-not $modelsInstalled) {
+        Write-Fail 'face_recognition_models still not installed!'
+        Write-Host '  Run this manually:' -ForegroundColor Gray
+        Write-Host "  $venvPython -m pip install git+https://github.com/ageitgey/face_recognition_models" -ForegroundColor White
+    } else {
+        Write-Ok 'face_recognition_models installed'
+    }
+} else {
+    Write-Ok 'face_recognition_models already installed'
 }
 
 # Install face_recognition itself
 Write-Step 'Installing face_recognition...'
 & $venvPython -m pip install --no-deps face-recognition==1.3.0 --quiet
 
-Write-Step 'Checking face_recognition import...'
-& $venvPython -c "import face_recognition; face_recognition.face_encodings; print('    OK: models loaded')"
+# Deep check: actually trigger models loading
+Write-Step 'Checking full import chain...'
+& $venvPython -c "from face_recognition.api import face_encodings; print('    ALL OK')"
 if ($LASTEXITCODE -ne 0) {
-    Write-Warn 'face_recognition check failed. Server may not start.'
-    Write-Host '  Try manually: pip install git+https://github.com/ageitgey/face_recognition_models' -ForegroundColor Gray
+    Write-Fail 'face_recognition deep check failed!'
+    Write-Host '  Diagnostics:' -ForegroundColor Gray
+    & $venvPython -m pip show face-recognition-models 2>&1 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    & $venvPython -m pip show face-recognition 2>&1 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    & $venvPython -m pip show dlib-bin 2>&1 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    Write-Host ''
+    Write-Host '  Server will try to start but may fail.' -ForegroundColor DarkYellow
 } else {
-    Write-Ok 'face_recognition ready'
+    Write-Ok 'face_recognition fully working'
 }
 Write-Ok 'Backend dependencies ready'
 
@@ -432,10 +452,11 @@ $caddyErr = Join-Path $runtimeDir 'caddy.err.log'
 $cloudOut = Join-Path $runtimeDir 'cloudflared.out.log'
 $cloudErr = Join-Path $runtimeDir 'cloudflared.err.log'
 
-# API (give it 3 seconds to start since it loads face_recognition models)
+# API (use batch wrapper to activate venv properly)
+$apiBat = Join-Path $backendDir 'run-api.bat'
 $apiProcess = Start-BackgroundProcess -Name 'Flask API' `
-    -FilePath $venvPython `
-    -Arguments @('telegram_service.py') `
+    -FilePath 'cmd.exe' `
+    -Arguments @('/c', $apiBat) `
     -WorkDir $backendDir `
     -LogOut $apiOut -LogErr $apiErr `
     -WaitMs 3000
