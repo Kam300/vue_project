@@ -1,32 +1,22 @@
 <#
 .SYNOPSIS
-    Полный запуск сервера «Семейное Древо» на любом Windows ПК.
-    Скрипт автоматически установит все зависимости и запустит все сервисы.
-
-.DESCRIPTION
-    Что делает скрипт:
-    1. Проверяет и устанавливает: Node.js, Python, Caddy, Cloudflared (через winget)
-    2. Устанавливает npm и pip зависимости
-    3. Собирает Vue.js фронтенд
-    4. Запускает Flask API (порт 5000)
-    5. Запускает Caddy (порт 8080)
-    6. Запускает Cloudflare Tunnel (totalcode.indevs.in)
-    7. Проверяет работу всех сервисов
+    Full server launch for "Family Tree" on any Windows PC.
+    Auto-installs all dependencies and starts all services.
 
 .USAGE
-    1. Скопируйте папку проекта на другой ПК
-    2. Откройте PowerShell от имени администратора (при первом запуске для установки)
-    3. Выполните:
+    1. Copy the project folder to another PC
+    2. Open PowerShell as Administrator (first run only, for installing tools)
+    3. Run:
          Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
          .\start-server.ps1
-    4. При повторном запуске права администратора НЕ нужны
+    4. Subsequent runs do NOT require admin rights
 #>
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # ========================================
-# КОНФИГУРАЦИЯ
+# CONFIGURATION
 # ========================================
 $repoRoot = $PSScriptRoot
 if (-not $repoRoot) { $repoRoot = Get-Location }
@@ -45,40 +35,39 @@ $venvPython         = Join-Path $venvDir 'Scripts\python.exe'
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 
 Write-Host ''
-Write-Host '╔══════════════════════════════════════════════════╗' -ForegroundColor Cyan
-Write-Host '║        Семейное Древо — FamilyOne Server         ║' -ForegroundColor Cyan
-Write-Host '║          Автоматическая установка и запуск        ║' -ForegroundColor Cyan
-Write-Host '╚══════════════════════════════════════════════════╝' -ForegroundColor Cyan
+Write-Host '========================================================' -ForegroundColor Cyan
+Write-Host '        Family Tree Server - Auto Setup & Launch         ' -ForegroundColor Cyan
+Write-Host '========================================================' -ForegroundColor Cyan
 Write-Host ''
 
 # ========================================
-# УТИЛИТЫ
+# UTILITIES
 # ========================================
 
 function Write-Step {
     param([string]$Message)
-    Write-Host "  ▸ $Message" -ForegroundColor Yellow
+    Write-Host "  > $Message" -ForegroundColor Yellow
 }
 
 function Write-Ok {
     param([string]$Message)
-    Write-Host "  ✓ $Message" -ForegroundColor Green
+    Write-Host "  OK: $Message" -ForegroundColor Green
 }
 
 function Write-Warn {
     param([string]$Message)
-    Write-Host "  ⚠ $Message" -ForegroundColor DarkYellow
+    Write-Host "  WARN: $Message" -ForegroundColor DarkYellow
 }
 
 function Write-Fail {
     param([string]$Message)
-    Write-Host "  ✗ $Message" -ForegroundColor Red
+    Write-Host "  FAIL: $Message" -ForegroundColor Red
 }
 
 function Write-Section {
     param([string]$Title)
     Write-Host ''
-    Write-Host "━━━ $Title ━━━" -ForegroundColor Magenta
+    Write-Host "--- $Title ---" -ForegroundColor Magenta
 }
 
 function Test-CommandExists {
@@ -101,23 +90,22 @@ function Install-ViaWinget {
     )
 
     if (-not (Test-CommandExists 'winget')) {
-        Write-Fail "winget не найден. Установите $FriendlyName вручную и перезапустите скрипт."
-        Write-Host "    Скачать: https://winget.run/$PackageId" -ForegroundColor Gray
-        throw "Не удалось установить $FriendlyName — winget недоступен."
+        Write-Fail "winget not found. Install $FriendlyName manually and re-run."
+        throw "Cannot install $FriendlyName - winget unavailable."
     }
 
-    Write-Step "Устанавливаем $FriendlyName через winget..."
+    Write-Step "Installing $FriendlyName via winget..."
     winget install --id $PackageId --accept-source-agreements --accept-package-agreements --silent
     if ($LASTEXITCODE -ne 0) {
-        throw "Ошибка установки $FriendlyName. Установите вручную."
+        throw "Failed to install $FriendlyName. Install manually."
     }
 
-    # Обновляем PATH для текущей сессии
+    # Refresh PATH for current session
     $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
     $userPath    = [Environment]::GetEnvironmentVariable('Path', 'User')
     $env:Path    = "$machinePath;$userPath"
 
-    Write-Ok "$FriendlyName установлен"
+    Write-Ok "$FriendlyName installed"
 }
 
 function Find-AndAddToPath {
@@ -189,7 +177,7 @@ function Start-BackgroundProcess {
         [string]$LogErr
     )
 
-    Write-Step "Запускаем $Name..."
+    Write-Step "Starting $Name..."
     $process = Start-Process -FilePath $FilePath `
         -ArgumentList $Arguments `
         -WorkingDirectory $WorkDir `
@@ -199,21 +187,20 @@ function Start-BackgroundProcess {
 
     Start-Sleep -Milliseconds 500
     if (-not $process -or $process.HasExited) {
-        Write-Fail "$Name не запустился! Проверьте логи: $LogErr"
+        Write-Fail "$Name failed to start! Check logs: $LogErr"
         throw "$Name failed to start."
     }
 
-    Write-Ok "$Name запущен (PID: $($process.Id))"
+    Write-Ok "$Name running (PID: $($process.Id))"
     return $process
 }
 
 # ========================================
-# ШАГ 1: ОСТАНОВКА ПРЕДЫДУЩИХ ПРОЦЕССОВ
+# STEP 1: STOP PREVIOUS PROCESSES
 # ========================================
 
-Write-Section 'Шаг 1/7 — Остановка предыдущих процессов'
+Write-Section 'Step 1/7 - Stopping previous processes'
 
-$stopScript = Join-Path $repoRoot 'scripts\stop-all.ps1'
 if (Test-Path $pidsFile) {
     try {
         $pids = Get-Content $pidsFile -Raw | ConvertFrom-Json
@@ -222,23 +209,23 @@ if (Test-Path $pidsFile) {
                 $p = Get-Process -Id $proc.pid -ErrorAction SilentlyContinue
                 if ($p) {
                     Stop-Process -Id $proc.pid -Force -ErrorAction SilentlyContinue
-                    Write-Ok "Остановлен $($proc.name) (PID $($proc.pid))"
+                    Write-Ok "Stopped $($proc.name) (PID $($proc.pid))"
                 }
             } catch {}
         }
         Remove-Item $pidsFile -Force -ErrorAction SilentlyContinue
     } catch {
-        Write-Warn 'Не удалось прочитать pids.json, пропускаем'
+        Write-Warn 'Could not read pids.json, skipping'
     }
 } else {
-    Write-Ok 'Нет запущенных процессов'
+    Write-Ok 'No previous processes found'
 }
 
 # ========================================
-# ШАГ 2: ПРОВЕРКА И УСТАНОВКА ЗАВИСИМОСТЕЙ
+# STEP 2: CHECK & INSTALL DEPENDENCIES
 # ========================================
 
-Write-Section 'Шаг 2/7 — Проверка зависимостей'
+Write-Section 'Step 2/7 - Checking dependencies'
 
 # -- Node.js --
 $nodeFound = Find-AndAddToPath 'node' @(
@@ -246,10 +233,10 @@ $nodeFound = Find-AndAddToPath 'node' @(
     "$env:LOCALAPPDATA\Programs\nodejs\node.exe"
 )
 if (-not $nodeFound) {
-    Write-Warn 'Node.js не найден, устанавливаем...'
+    Write-Warn 'Node.js not found, installing...'
     Install-ViaWinget 'OpenJS.NodeJS.LTS' 'Node.js'
     if (-not (Test-CommandExists 'node')) {
-        throw 'Node.js не найден после установки. Перезапустите терминал и скрипт.'
+        throw 'Node.js not found after install. Restart terminal and re-run.'
     }
 }
 $nodeVersion = & node --version
@@ -261,18 +248,18 @@ Find-AndAddToPath 'npm' @(
     "$env:LOCALAPPDATA\Programs\nodejs\npm.cmd"
 ) | Out-Null
 if (-not (Test-CommandExists 'npm')) {
-    throw 'npm не найден. Переустановите Node.js.'
+    throw 'npm not found. Reinstall Node.js.'
 }
-Write-Ok "npm найден"
+Write-Ok 'npm found'
 
 # -- Python --
 $pythonCmd = Resolve-PythonCommand
 if (-not $pythonCmd) {
-    Write-Warn 'Python не найден, устанавливаем...'
+    Write-Warn 'Python not found, installing...'
     Install-ViaWinget 'Python.Python.3.11' 'Python 3.11'
     $pythonCmd = Resolve-PythonCommand
     if (-not $pythonCmd) {
-        throw 'Python не найден после установки. Перезапустите терминал и скрипт.'
+        throw 'Python not found after install. Restart terminal and re-run.'
     }
 }
 $pyVersionArgs = if ($pythonCmd -eq 'py') { @('-3', '--version') } else { @('--version') }
@@ -290,115 +277,116 @@ if ($wingetCaddy) {
 }
 $caddyFound = Find-AndAddToPath 'caddy' $caddyPaths
 if (-not $caddyFound) {
-    Write-Warn 'Caddy не найден, устанавливаем...'
+    Write-Warn 'Caddy not found, installing...'
     Install-ViaWinget 'CaddyServer.Caddy' 'Caddy Server'
     if (-not (Test-CommandExists 'caddy')) {
-        throw 'Caddy не найден после установки. Перезапустите терминал и скрипт.'
+        throw 'Caddy not found after install. Restart terminal and re-run.'
     }
 }
-Write-Ok 'Caddy найден'
+Write-Ok 'Caddy found'
 
 # -- cloudflared --
 if (-not (Test-CommandExists 'cloudflared')) {
-    Write-Warn 'cloudflared не найден, устанавливаем...'
+    Write-Warn 'cloudflared not found, installing...'
     Install-ViaWinget 'Cloudflare.cloudflared' 'Cloudflare Tunnel'
     if (-not (Test-CommandExists 'cloudflared')) {
-        throw 'cloudflared не найден после установки. Перезапустите терминал и скрипт.'
+        throw 'cloudflared not found after install. Restart terminal and re-run.'
     }
 }
-Write-Ok 'cloudflared найден'
+Write-Ok 'cloudflared found'
 
 # ========================================
-# ШАГ 3: НАСТРОЙКА CLOUDFLARE TUNNEL
+# STEP 3: CLOUDFLARE TUNNEL CONFIG
 # ========================================
 
-Write-Section 'Шаг 3/7 — Настройка Cloudflare Tunnel'
+Write-Section 'Step 3/7 - Cloudflare Tunnel config'
 
 if (-not (Test-Path $cloudflaredConfig)) {
-    Write-Warn "Конфигурация Cloudflare Tunnel не найдена."
+    Write-Warn 'Cloudflare Tunnel config not found.'
     Write-Host ''
-    Write-Host '  Для настройки выполните эти команды в ОТДЕЛЬНОМ терминале:' -ForegroundColor Cyan
+    Write-Host '  To set up the tunnel, run these commands in a SEPARATE terminal:' -ForegroundColor Cyan
     Write-Host ''
     Write-Host '    cloudflared tunnel login' -ForegroundColor White
     Write-Host '    cloudflared tunnel create family-tree-server' -ForegroundColor White
     Write-Host '    cloudflared tunnel route dns family-tree-server totalcode.indevs.in' -ForegroundColor White
     Write-Host ''
-    Write-Host "  Затем скопируйте $cloudflaredExample" -ForegroundColor Gray
-    Write-Host "  в $cloudflaredConfig" -ForegroundColor Gray
-    Write-Host '  и заполните tunnel ID и путь к credentials.' -ForegroundColor Gray
+    Write-Host "  Then copy: $cloudflaredExample" -ForegroundColor Gray
+    Write-Host "  to:        $cloudflaredConfig" -ForegroundColor Gray
+    Write-Host '  and fill in tunnel ID + credentials path.' -ForegroundColor Gray
     Write-Host ''
 
-    $skipTunnel = Read-Host '  Запустить сервер БЕЗ Cloudflare Tunnel? (y/n)'
+    $skipTunnel = Read-Host '  Start server WITHOUT Cloudflare Tunnel? (y/n)'
     if ($skipTunnel -ne 'y' -and $skipTunnel -ne 'Y') {
-        throw 'Настройте Cloudflare Tunnel и перезапустите скрипт.'
+        throw 'Set up Cloudflare Tunnel config and re-run.'
     }
     $noTunnel = $true
 } else {
     $noTunnel = $false
-    Write-Ok "Конфигурация найдена: $cloudflaredConfig"
+    Write-Ok "Config found: $cloudflaredConfig"
 }
 
 # ========================================
-# ШАГ 4: BACKEND — PYTHON VENV + ЗАВИСИМОСТИ
+# STEP 4: PYTHON VENV + DEPENDENCIES
 # ========================================
 
-Write-Section 'Шаг 4/7 — Установка Python зависимостей'
+Write-Section 'Step 4/7 - Python dependencies'
 
 if (-not (Test-Path $backendEnvFile)) {
-    Copy-Item -Path $backendEnvExample -Destination $backendEnvFile
-    Write-Ok 'Создан backend/.env из .env.example'
+    if (Test-Path $backendEnvExample) {
+        Copy-Item -Path $backendEnvExample -Destination $backendEnvFile
+        Write-Ok 'Created backend/.env from .env.example'
+    }
 }
 
 $pyPrefix = if ($pythonCmd -eq 'py') { @('-3') } else { @() }
 
 if (-not (Test-Path $venvPython)) {
-    Write-Step 'Создаём виртуальное окружение Python...'
+    Write-Step 'Creating Python virtual environment...'
     & $pythonCmd @pyPrefix -m venv $venvDir
-    if ($LASTEXITCODE -ne 0) { throw 'Ошибка создания venv.' }
-    Write-Ok 'venv создан'
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to create venv.' }
+    Write-Ok 'venv created'
 }
 
-Write-Step 'Обновляем pip...'
+Write-Step 'Upgrading pip...'
 & $venvPython -m pip install --upgrade pip --quiet
-if ($LASTEXITCODE -ne 0) { throw 'Ошибка обновления pip.' }
+if ($LASTEXITCODE -ne 0) { throw 'pip upgrade failed.' }
 
-Write-Step 'Устанавливаем Python зависимости...'
+Write-Step 'Installing Python packages...'
 & $venvPython -m pip install -r (Join-Path $backendDir 'requirements.txt') --quiet
-if ($LASTEXITCODE -ne 0) { throw 'Ошибка pip install.' }
+if ($LASTEXITCODE -ne 0) { throw 'pip install failed.' }
 
-# Установка face-recognition на Windows без сборки dlib из исходников
+# face-recognition on Windows (pre-built dlib)
 $isWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
 if ($isWindows) {
-    & $venvPython -m pip install --no-deps face-recognition==1.3.0 --quiet
-    if ($LASTEXITCODE -ne 0) { throw 'Ошибка установки face-recognition.' }
+    & $venvPython -m pip install --no-deps face-recognition==1.3.0 --quiet 2>$null
 }
 
-Write-Step 'Проверяем face_recognition...'
-& $venvPython -c "import face_recognition, dlib; print('  face_recognition + dlib OK')"
-if ($LASTEXITCODE -ne 0) { throw 'Не удалось импортировать face_recognition/dlib.' }
-Write-Ok 'Backend зависимости установлены'
+Write-Step 'Checking face_recognition import...'
+& $venvPython -c "import face_recognition, dlib; print('    face_recognition + dlib OK')"
+if ($LASTEXITCODE -ne 0) { throw 'Cannot import face_recognition/dlib.' }
+Write-Ok 'Backend dependencies ready'
 
 # ========================================
-# ШАГ 5: FRONTEND — NPM + BUILD
+# STEP 5: FRONTEND BUILD
 # ========================================
 
-Write-Section 'Шаг 5/7 — Сборка фронтенда'
+Write-Section 'Step 5/7 - Building frontend'
 
-Write-Step 'Устанавливаем npm зависимости...'
+Write-Step 'npm install...'
 npm install --silent 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'npm install failed.' }
-Write-Ok 'npm зависимости установлены'
+Write-Ok 'npm packages installed'
 
-Write-Step 'Собираем фронтенд (npm run build)...'
+Write-Step 'npm run build...'
 npm run build 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'npm run build failed.' }
-Write-Ok 'Фронтенд собран → dist/'
+Write-Ok 'Frontend built -> dist/'
 
 # ========================================
-# ШАГ 6: ЗАПУСК СЕРВИСОВ
+# STEP 6: START SERVICES
 # ========================================
 
-Write-Section 'Шаг 6/7 — Запуск сервисов'
+Write-Section 'Step 6/7 - Starting services'
 
 $apiOut   = Join-Path $runtimeDir 'api.out.log'
 $apiErr   = Join-Path $runtimeDir 'api.err.log'
@@ -422,7 +410,7 @@ $caddyProcess = Start-BackgroundProcess -Name 'Caddy' `
     -WorkDir $repoRoot `
     -LogOut $caddyOut -LogErr $caddyErr
 
-# Cloudflared (если настроен)
+# Cloudflared (if configured)
 $cloudflaredProcess = $null
 if (-not $noTunnel) {
     $cloudflaredProcess = Start-BackgroundProcess -Name 'Cloudflare Tunnel' `
@@ -432,7 +420,7 @@ if (-not $noTunnel) {
         -LogOut $cloudOut -LogErr $cloudErr
 }
 
-# Сохраняем PID-ы
+# Save PIDs
 $processes = @(
     [ordered]@{ name = 'api'; pid = $apiProcess.Id; stdout = $apiOut; stderr = $apiErr }
     [ordered]@{ name = 'caddy'; pid = $caddyProcess.Id; stdout = $caddyOut; stderr = $caddyErr }
@@ -447,35 +435,35 @@ $pidPayload = [ordered]@{
 $pidPayload | ConvertTo-Json -Depth 6 | Set-Content -Path $pidsFile -Encoding UTF8
 
 # ========================================
-# ШАГ 7: ПРОВЕРКА РАБОТЫ
+# STEP 7: HEALTH CHECKS
 # ========================================
 
-Write-Section 'Шаг 7/7 — Проверка работы'
+Write-Section 'Step 7/7 - Health checks'
 
-Write-Step 'Ожидаем API сервер...'
+Write-Step 'Waiting for API server...'
 if (-not (Wait-ForHttp 'http://127.0.0.1:5000/health' 50 1)) {
-    Write-Fail 'API сервер не отвечает!'
-    Write-Host "  Логи: $apiErr" -ForegroundColor Gray
+    Write-Fail 'API server not responding!'
+    Write-Host "  Logs: $apiErr" -ForegroundColor Gray
     throw 'API health check failed.'
 }
-Write-Ok 'API сервер — OK'
+Write-Ok 'API server - OK'
 
-Write-Step 'Ожидаем Caddy...'
+Write-Step 'Waiting for Caddy...'
 if (-not (Wait-ForHttp 'http://127.0.0.1:8080/' 30 1)) {
-    Write-Fail 'Caddy не отвечает!'
+    Write-Fail 'Caddy not responding!'
     throw 'Caddy check failed.'
 }
-Write-Ok 'Caddy — OK'
+Write-Ok 'Caddy - OK'
 
-Write-Step 'Проверяем маршрутизацию API...'
+Write-Step 'Checking API routing through Caddy...'
 if (-not (Wait-ForHttp 'http://127.0.0.1:8080/api/health' 20 1)) {
-    Write-Fail 'API маршрутизация через Caddy не работает!'
+    Write-Fail 'API routing through Caddy not working!'
     throw 'Caddy API routing check failed.'
 }
-Write-Ok 'API маршрутизация — OK'
+Write-Ok 'API routing - OK'
 
 if (-not $noTunnel) {
-    Write-Step 'Проверяем Cloudflare Tunnel...'
+    Write-Step 'Checking Cloudflare Tunnel...'
     $externalUrls = @(
         'https://totalcode.indevs.in/',
         'https://totalcode.indevs.in/api/health'
@@ -484,36 +472,35 @@ if (-not $noTunnel) {
         if (Wait-ForHttp $url 5 2) {
             Write-Ok $url
         } else {
-            Write-Warn "$url — не отвечает (может потребоваться время)"
+            Write-Warn "$url - may need more time"
         }
     }
 }
 
 # ========================================
-# ГОТОВО!
+# DONE!
 # ========================================
 
 Write-Host ''
-Write-Host '╔══════════════════════════════════════════════════╗' -ForegroundColor Green
-Write-Host '║             ✓ Сервер запущен успешно!            ║' -ForegroundColor Green
-Write-Host '╚══════════════════════════════════════════════════╝' -ForegroundColor Green
+Write-Host '========================================================' -ForegroundColor Green
+Write-Host '          SERVER STARTED SUCCESSFULLY!                   ' -ForegroundColor Green
+Write-Host '========================================================' -ForegroundColor Green
 Write-Host ''
-Write-Host "  Локальный сайт:    http://127.0.0.1:8080" -ForegroundColor White
-Write-Host "  Локальный API:     http://127.0.0.1:5000/health" -ForegroundColor White
+Write-Host "  Local site:    http://127.0.0.1:8080" -ForegroundColor White
+Write-Host "  Local API:     http://127.0.0.1:5000/health" -ForegroundColor White
 if (-not $noTunnel) {
-    Write-Host "  Внешний сайт:      https://totalcode.indevs.in" -ForegroundColor Cyan
-    Write-Host "  Внешний API:       https://totalcode.indevs.in/api/health" -ForegroundColor Cyan
+    Write-Host "  External:      https://totalcode.indevs.in" -ForegroundColor Cyan
+    Write-Host "  External API:  https://totalcode.indevs.in/api/health" -ForegroundColor Cyan
 }
 Write-Host ''
-Write-Host "  PID файл:          $pidsFile" -ForegroundColor Gray
-Write-Host "  Логи:              $runtimeDir" -ForegroundColor Gray
+Write-Host "  PID file:      $pidsFile" -ForegroundColor Gray
+Write-Host "  Logs:          $runtimeDir" -ForegroundColor Gray
 Write-Host ''
-Write-Host "  API:          PID $($apiProcess.Id)" -ForegroundColor Gray
-Write-Host "  Caddy:        PID $($caddyProcess.Id)" -ForegroundColor Gray
+Write-Host "  API:           PID $($apiProcess.Id)" -ForegroundColor Gray
+Write-Host "  Caddy:         PID $($caddyProcess.Id)" -ForegroundColor Gray
 if ($cloudflaredProcess) {
-    Write-Host "  Cloudflared:  PID $($cloudflaredProcess.Id)" -ForegroundColor Gray
+    Write-Host "  Cloudflared:   PID $($cloudflaredProcess.Id)" -ForegroundColor Gray
 }
 Write-Host ''
-Write-Host '  Для остановки: .\scripts\stop-all.ps1' -ForegroundColor DarkGray
-Write-Host '  Или просто закройте терминал.' -ForegroundColor DarkGray
+Write-Host '  To stop: .\stop-server.ps1' -ForegroundColor DarkGray
 Write-Host ''
