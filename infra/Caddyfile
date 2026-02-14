@@ -1,0 +1,17 @@
+﻿:8080 {
+    encode gzip
+
+    @legacy path /health /register_face /recognize_face /delete_face/* /list_faces /clear_all /generate_pdf /download_pdf/*
+
+    handle_path /api/* {
+        reverse_proxy 127.0.0.1:5000
+    }
+
+    handle @legacy {
+        reverse_proxy 127.0.0.1:5000
+    }
+
+    root * dist
+    try_files {path} /index.html
+    file_server
+}

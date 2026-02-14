@@ -1,0 +1,13 @@
+﻿# Copy this file to infra/cloudflared/config.yml and fill real values.
+# Tunnel bootstrap:
+#   cloudflared tunnel login
+#   cloudflared tunnel create vue-api-pc
+#   cloudflared tunnel route dns vue-api-pc totalcode.indevs.in
+
+tunnel: YOUR_TUNNEL_ID
+credentials-file: C:\Users\<USERNAME>\.cloudflared\YOUR_TUNNEL_ID.json
+
+ingress:
+  - hostname: totalcode.indevs.in
+    service: http://127.0.0.1:8080
+  - service: http_status:404

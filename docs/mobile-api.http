@@ -1,0 +1,52 @@
+@baseUrl = https://totalcode.indevs.in/api
+
+### Health
+GET {{baseUrl}}/health
+
+### List faces
+GET {{baseUrl}}/list_faces
+
+### Register face
+POST {{baseUrl}}/register_face
+Content-Type: application/json
+
+{
+  "member_id": "1",
+  "member_name": "Ivan",
+  "image": "data:image/jpeg;base64,PASTE_BASE64_HERE"
+}
+
+### Recognize face
+POST {{baseUrl}}/recognize_face
+Content-Type: application/json
+
+{
+  "image": "data:image/jpeg;base64,PASTE_BASE64_HERE",
+  "threshold": 0.6
+}
+
+### Delete face by member ID
+DELETE {{baseUrl}}/delete_face/1
+
+### Clear all faces
+DELETE {{baseUrl}}/clear_all
+
+### Generate PDF (minimal)
+POST {{baseUrl}}/generate_pdf
+Content-Type: application/json
+
+{
+  "members": [
+    {
+      "id": "1",
+      "firstName": "Ivan",
+      "lastName": "Ivanov",
+      "role": "FATHER"
+    }
+  ],
+  "format": "A4_LANDSCAPE",
+  "use_drive": true
+}
+
+### Download PDF by drive ID
+GET {{baseUrl}}/download_pdf/DRIVE_ID
