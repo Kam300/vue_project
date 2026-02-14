@@ -11,7 +11,10 @@
         reverse_proxy 127.0.0.1:5000
     }
 
-    root * dist
-    try_files {path} /index.html
-    file_server
+    handle {
+        root * dist
+        try_files {path} /index.html
+        file_server
+    }
 }
+

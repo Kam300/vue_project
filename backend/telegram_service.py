@@ -541,6 +541,7 @@ def decode_base64_image(base64_string):
 # ОБЩИЕ РОУТЫ
 # ========================================
 
+@app.route('/api/health', methods=['GET'])
 @app.route('/health', methods=['GET'])
 def health_check():
     """Проверка работоспособности сервера"""
@@ -557,6 +558,7 @@ def health_check():
 # FACE RECOGNITION - Роуты
 # ========================================
 
+@app.route('/api/register_face', methods=['POST'])
 @app.route('/register_face', methods=['POST'])
 def register_face():
     """
@@ -640,6 +642,7 @@ def register_face():
         }, 500)
 
 
+@app.route('/api/recognize_face', methods=['POST'])
 @app.route('/recognize_face', methods=['POST'])
 def recognize_face():
     """
@@ -751,6 +754,7 @@ def recognize_face():
         }, 500)
 
 
+@app.route('/api/delete_face/<member_id>', methods=['DELETE'])
 @app.route('/delete_face/<member_id>', methods=['DELETE'])
 def delete_face(member_id):
     """Удаление эталонного фото члена семьи"""
@@ -787,6 +791,7 @@ def delete_face(member_id):
         }, 500)
 
 
+@app.route('/api/list_faces', methods=['GET'])
 @app.route('/list_faces', methods=['GET'])
 def list_faces():
     """Получение списка зарегистрированных лиц"""
@@ -813,6 +818,7 @@ def list_faces():
         }, 500)
 
 
+@app.route('/api/clear_all', methods=['DELETE'])
 @app.route('/clear_all', methods=['DELETE'])
 def clear_all():
     """Очистка всей базы распознавания лиц"""
@@ -853,6 +859,7 @@ def clear_all():
 # PDF GENERATION - Роуты
 # ========================================
 
+@app.route('/api/generate_pdf', methods=['POST'])
 @app.route('/generate_pdf', methods=['POST'])
 def generate_pdf():
     try:
@@ -936,6 +943,7 @@ def generate_pdf():
         return make_response_json({'success': False, 'error': str(e)}, 500)
 
 
+@app.route('/api/download_pdf/<drive_id>', methods=['GET'])
 @app.route('/download_pdf/<drive_id>', methods=['GET'])
 def download_pdf_proxy(drive_id):
     """
@@ -1643,3 +1651,4 @@ if __name__ == '__main__':
         logger.warning("Waitress не установлен, используем Flask dev-server")
         logger.warning("Для лучшей работы с ngrok: pip install waitress")
         app.run(host=API_HOST, port=API_PORT, debug=False)
+
