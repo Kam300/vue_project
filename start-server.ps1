@@ -372,27 +372,29 @@ Write-Step 'Installing Python packages...'
 & $venvPython -m pip install -r (Join-Path $backendDir 'requirements.txt') --quiet
 if ($LASTEXITCODE -ne 0) { throw 'pip install failed.' }
 
-# face-recognition on Windows (pre-built dlib)
+# face-recognition on Windows (pre-built dlib + models)
 $isWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+
+Write-Step 'Installing face_recognition packages...'
+& $venvPython -m pip install face-recognition-models==0.3.0 --quiet 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Step 'Installing face_recognition_models from git...'
+    & $venvPython -m pip install "git+https://github.com/ageitgey/face_recognition_models" --quiet 2>$null
+}
+
 if ($isWindows) {
+    & $venvPython -m pip install dlib-bin --quiet 2>$null
     & $venvPython -m pip install --no-deps face-recognition==1.3.0 --quiet 2>$null
+} else {
+    & $venvPython -m pip install face-recognition==1.3.0 --quiet 2>$null
 }
 
 Write-Step 'Checking face_recognition import...'
 & $venvPython -c "import face_recognition, dlib; print('    face_recognition + dlib OK')"
 if ($LASTEXITCODE -ne 0) {
-    Write-Warn 'face_recognition/dlib import failed!'
-    Write-Step 'Trying to install dlib-bin...'
-    & $venvPython -m pip install dlib-bin --quiet 2>$null
-    & $venvPython -m pip install --no-deps face-recognition==1.3.0 --quiet 2>$null
-    & $venvPython -c "import face_recognition, dlib; print('    face_recognition + dlib OK')"
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warn 'face_recognition still cannot be imported.'
-        Write-Host '  The server will try to start anyway, but face recognition may not work.' -ForegroundColor Gray
-        Write-Host '  You may need to install CMake and Visual Studio Build Tools.' -ForegroundColor Gray
-    } else {
-        Write-Ok 'face_recognition + dlib OK (after retry)'
-    }
+    Write-Warn 'face_recognition/dlib import check failed.'
+    Write-Host '  The server will try to start anyway, but face recognition may not work.' -ForegroundColor Gray
+    Write-Host '  You may need: pip install CMake, Visual Studio Build Tools.' -ForegroundColor Gray
 } else {
     Write-Ok 'face_recognition + dlib OK'
 }
