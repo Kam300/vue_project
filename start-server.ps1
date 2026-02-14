@@ -174,7 +174,8 @@ function Start-BackgroundProcess {
         [string[]]$Arguments,
         [string]$WorkDir,
         [string]$LogOut,
-        [string]$LogErr
+        [string]$LogErr,
+        [int]$WaitMs = 1000
     )
 
     Write-Step "Starting $Name..."
@@ -185,9 +186,25 @@ function Start-BackgroundProcess {
         -RedirectStandardError $LogErr `
         -PassThru -WindowStyle Hidden
 
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds $WaitMs
     if (-not $process -or $process.HasExited) {
-        Write-Fail "$Name failed to start! Check logs: $LogErr"
+        Write-Fail "$Name failed to start!"
+        Write-Host ''
+        Write-Host '  --- ERROR LOG ---' -ForegroundColor Red
+        if (Test-Path $LogErr) {
+            $errContent = Get-Content $LogErr -Raw -ErrorAction SilentlyContinue
+            if ($errContent) {
+                Write-Host $errContent -ForegroundColor Gray
+            }
+        }
+        if (Test-Path $LogOut) {
+            $outContent = Get-Content $LogOut -Raw -ErrorAction SilentlyContinue
+            if ($outContent) {
+                Write-Host $outContent -ForegroundColor Gray
+            }
+        }
+        Write-Host '  --- END LOG ---' -ForegroundColor Red
+        Write-Host ''
         throw "$Name failed to start."
     }
 
@@ -363,7 +380,22 @@ if ($isWindows) {
 
 Write-Step 'Checking face_recognition import...'
 & $venvPython -c "import face_recognition, dlib; print('    face_recognition + dlib OK')"
-if ($LASTEXITCODE -ne 0) { throw 'Cannot import face_recognition/dlib.' }
+if ($LASTEXITCODE -ne 0) {
+    Write-Warn 'face_recognition/dlib import failed!'
+    Write-Step 'Trying to install dlib-bin...'
+    & $venvPython -m pip install dlib-bin --quiet 2>$null
+    & $venvPython -m pip install --no-deps face-recognition==1.3.0 --quiet 2>$null
+    & $venvPython -c "import face_recognition, dlib; print('    face_recognition + dlib OK')"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn 'face_recognition still cannot be imported.'
+        Write-Host '  The server will try to start anyway, but face recognition may not work.' -ForegroundColor Gray
+        Write-Host '  You may need to install CMake and Visual Studio Build Tools.' -ForegroundColor Gray
+    } else {
+        Write-Ok 'face_recognition + dlib OK (after retry)'
+    }
+} else {
+    Write-Ok 'face_recognition + dlib OK'
+}
 Write-Ok 'Backend dependencies ready'
 
 # ========================================
@@ -395,12 +427,13 @@ $caddyErr = Join-Path $runtimeDir 'caddy.err.log'
 $cloudOut = Join-Path $runtimeDir 'cloudflared.out.log'
 $cloudErr = Join-Path $runtimeDir 'cloudflared.err.log'
 
-# API
+# API (give it 3 seconds to start since it loads face_recognition models)
 $apiProcess = Start-BackgroundProcess -Name 'Flask API' `
     -FilePath $venvPython `
     -Arguments @('telegram_service.py') `
     -WorkDir $backendDir `
-    -LogOut $apiOut -LogErr $apiErr
+    -LogOut $apiOut -LogErr $apiErr `
+    -WaitMs 3000
 
 # Caddy
 $caddyConfigPath = Join-Path $repoRoot 'infra\Caddyfile'
