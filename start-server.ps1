@@ -238,6 +238,14 @@ if (Test-Path $pidsFile) {
     Write-Ok 'No previous processes found'
 }
 
+# Убиваем все оставшиеся Python-процессы (чтобы не было зомби со старым кодом)
+$pythonProcs = Get-Process python -ErrorAction SilentlyContinue
+if ($pythonProcs) {
+    $pythonProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Ok "Stopped $($pythonProcs.Count) stale Python process(es)"
+    Start-Sleep -Seconds 2
+}
+
 # ========================================
 # STEP 2: CHECK & INSTALL DEPENDENCIES
 # ========================================

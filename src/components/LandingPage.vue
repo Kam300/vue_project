@@ -11,6 +11,7 @@ const logs = ref([])
 const maxLogs = 40
 let pollTimer = null
 let checkCount = ref(0)
+const shownEventKeys = new Set()
 
 function addLog(icon, message, type = 'info') {
   const now = new Date()
@@ -41,6 +42,17 @@ async function checkHealth() {
         addLog('📄', 'Модуль генерации PDF — активен', 'success')
       }
       addLog('👥', `Зарегистрировано лиц в базе: ${data.members_count}`, 'info')
+
+      // Отображаем серверные события (PDF генерация и т.д.)
+      if (data.recent_events && data.recent_events.length > 0) {
+        data.recent_events.forEach(ev => {
+          const key = `${ev.ts}_${ev.message}`
+          if (!shownEventKeys.has(key)) {
+            shownEventKeys.add(key)
+            addLog(ev.icon || '🔔', ev.message, ev.type || 'info')
+          }
+        })
+      }
     } else {
       apiStatus.value = 'error'
       addLog('⚠️', `Сервер ответил с ошибкой (код ${res.status}). Время: ${elapsed}мс`, 'error')

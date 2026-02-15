@@ -159,7 +159,7 @@ face_encodings_db = {}
 # Используем CNN модель для GPU ускорения (требуется dlib с CUDA)
 # 'cnn' - использует GPU (CUDA), более точный но требует GPU
 # 'hog' - использует CPU, быстрее на CPU но менее точный
-USE_CUDA = False  # Отключено для скорости (HOG быстрее на CPU)
+USE_CUDA = True  # Отключено для скорости (HOG быстрее на CPU)
 FACE_MODEL = 'cnn' if USE_CUDA else 'hog'
 
 # Количество раз для повышения разрешения при поиске лиц (0 = без увеличения)
@@ -209,6 +209,20 @@ GOOGLE_SCOPES = ['https://www.googleapis.com/auth/drive.file']
 
 # Кэшированный сервис Google Drive
 _google_drive_service = None
+
+# Журнал последних событий для веб-панели
+from collections import deque
+recent_events = deque(maxlen=20)
+
+def add_event(icon, message, event_type='info'):
+    """Добавить событие в журнал для веб-панели"""
+    from datetime import datetime
+    recent_events.appendleft({
+        'ts': datetime.now().strftime('%H:%M:%S'),
+        'icon': icon,
+        'message': message,
+        'type': event_type
+    })
 
 
 def get_google_drive_service():
@@ -545,12 +559,20 @@ def decode_base64_image(base64_string):
 @app.route('/health', methods=['GET'])
 def health_check():
     """Проверка работоспособности сервера"""
+    # Собираем новые события (которые клиент ещё не видел)
+    since = request.args.get('since', '')
+    events_list = list(recent_events)
+    if since:
+        # Отдаём только события новее указанной метки
+        events_list = [e for e in events_list if e['ts'] > since]
+
     return make_response_json({
         'status': 'ok',
         'service': 'combined_server',
         'face_recognition': True,
         'pdf_generation': True,
-        'members_count': len(face_encodings_db)
+        'members_count': len(face_encodings_db),
+        'recent_events': events_list
     })
 
 
@@ -864,9 +886,21 @@ def clear_all():
 def generate_pdf():
     try:
         data = request.json
+        logger.info(f"PDF request keys: {list(data.keys())}")
+        logger.info(f"PDF raw show_photos={data.get('show_photos')}, show_dates={data.get('show_dates')}, show_patronymic={data.get('show_patronymic')}, title={data.get('title')}")
         members = data.get('members', [])
         page_format = data.get('format', 'A4_LANDSCAPE')
-        use_drive = data.get('use_drive', True)  # По умолчанию загружать в Drive
+        use_drive = data.get('use_drive', True)
+
+        # Новые настройки PDF
+        pdf_settings = {
+            'show_photos': data.get('show_photos', True),
+            'show_dates': data.get('show_dates', True),
+            'show_patronymic': data.get('show_patronymic', True),
+            'title': data.get('title', 'Семейное Древо'),
+            'photo_quality': data.get('photo_quality', 'medium'),
+        }
+        logger.info(f"PDF settings received: {pdf_settings}")
 
         if not members:
             return make_response_json({'success': False, 'error': 'Нет данных'}, 400)
@@ -889,13 +923,26 @@ def generate_pdf():
         c = canvas.Canvas(filepath, pagesize=pagesize)
         width, height = pagesize
 
-        draw_family_tree(c, members, width, height)
+        draw_family_tree(c, members, width, height, pdf_settings)
 
         c.save()
 
         # Получаем размер файла
         pdf_size = os.path.getsize(filepath)
         logger.info(f"PDF создан: {filename}, размер: {pdf_size} байт")
+        
+        # Событие для веб-панели
+        members_count = len(members)
+        size_kb = round(pdf_size / 1024)
+        settings_info = []
+        if not pdf_settings.get('show_photos', True):
+            settings_info.append('без фото')
+        if not pdf_settings.get('show_dates', True):
+            settings_info.append('без дат')
+        if not pdf_settings.get('show_patronymic', True):
+            settings_info.append('без отчеств')
+        extra = f" ({', '.join(settings_info)})" if settings_info else ""
+        add_event('📄', f"PDF создан: {members_count} чел., {page_format}, {size_kb} КБ{extra}", 'success')
 
         # Пробуем загрузить в Google Drive
         if use_drive and GOOGLE_DRIVE_AVAILABLE:
@@ -1000,14 +1047,15 @@ def download_pdf_proxy(drive_id):
 # PDF - Функции (ПОЛНЫЕ из pdf_server.py)
 # ========================================
 
-def draw_family_tree(c, members, width, height):
-    """Рисует семейное древо"""
+def draw_family_tree(c, members, width, height, settings=None):
+    """Рисует семейное древо с автомасштабированием и многостраничностью"""
+    if settings is None:
+        settings = {}
 
-    # Красивый градиентный фон
-    draw_beautiful_background(c, width, height)
-
-    # Заголовок
-    header_height = draw_header(c, width, height)
+    show_photos = settings.get('show_photos', True)
+    show_dates = settings.get('show_dates', True)
+    show_patronymic = settings.get('show_patronymic', True)
+    title = settings.get('title', 'Семейное Древо')
 
     # Группируем по поколениям
     generations = group_by_generation(members)
@@ -1027,60 +1075,220 @@ def draw_family_tree(c, members, width, height):
     if not active_gens:
         return
 
-    # Параметры
-    card_width = 130
-    card_height = 145
-    card_gap_x = 25
-    gen_gap_y = 50
+    # --- Авто-расчёт размеров карточек ---
+    margin_x = 40
+    usable_width = width - 2 * margin_x
+    header_h = 80
+    footer_h = 40
+    gen_label_h = 28  # высота метки поколения
+    usable_height = height - header_h - footer_h - 20
 
-    # Вычисляем общую высоту
-    total_height = len(active_gens) * card_height + (len(active_gens) - 1) * gen_gap_y + len(active_gens) * 25
-    start_y = height - header_height - 30
+    # Максимальное кол-во карточек в одном ряду
+    max_in_row = max(len(generations[k]) for k, _ in active_gens)
+    max_in_row = max(max_in_row, 1)
 
-    if total_height > start_y - 40:
-        # Уменьшаем если не помещается
-        scale = (start_y - 40) / total_height
-        card_height = int(card_height * scale)
-        gen_gap_y = int(gen_gap_y * scale)
+    # Вычисляем ширину карточки по самому широкому поколению
+    min_gap = 12
+    ideal_card_w = min(140, max(90, (usable_width - (max_in_row - 1) * min_gap) / max_in_row))
+    card_gap_x = min(20, max(min_gap, ideal_card_w * 0.12))
+
+    # Проверяем, нужен ли перенос в ряду (если карточки слишком узкие)
+    max_cards_per_row = max(1, int((usable_width + card_gap_x) / (90 + card_gap_x)))
+
+    # Считаем кол-во строк на каждое поколение
+    def rows_for_gen(gen_key):
+        n = len(generations[gen_key])
+        return max(1, (n + max_cards_per_row - 1) // max_cards_per_row)
+
+    # Пересчёт card_width если перенос не нужен
+    needs_wrap = any(len(generations[k]) > max_cards_per_row for k, _ in active_gens)
+    if not needs_wrap:
+        card_width = ideal_card_w
+    else:
+        card_width = max(90, (usable_width - (min(max_in_row, max_cards_per_row) - 1) * card_gap_x) / min(max_in_row, max_cards_per_row))
+
+    # Высота карточки по содержимому (а не по фиксированному коэффициенту)
+    s = card_width / 130.0
+    top_pad = max(8, int(10 * s))
+    bottom_pad = max(6, int(8 * s))
+    name_h = max(7, min(11, int(9 * s))) + 2
+    role_h = max(7, min(11, int(10 * s))) + 1
+    
+    content_h = top_pad + name_h + role_h + bottom_pad
+    
+    if show_photos:
+        photo_h = max(25, int(card_width * 0.38))
+        content_h += photo_h + max(4, int(5 * s))
+    if show_patronymic:
+        content_h += max(6, min(9, int(8 * s))) + 1
+    if show_dates:
+        content_h += max(6, min(9, int(8 * s))) + 2
+    
+    card_height = int(content_h)
+
+    # Вычисляем общее кол-во строк всех поколений
+    total_rows = sum(rows_for_gen(k) for k, _ in active_gens)
+    gen_gap_y = 30
+    total_content_h = total_rows * card_height + (total_rows - 1) * 8 + len(active_gens) * gen_label_h + (len(active_gens) - 1) * gen_gap_y
+
+    # Масштабируем если не помещается на одну страницу
+    if total_content_h > usable_height:
+        scale = usable_height / total_content_h
+        if scale >= 0.55:
+            # Уменьшаем пропорционально
+            card_height = max(60, int(card_height * scale))
+            card_width = max(80, int(card_width * scale))
+            card_gap_x = max(8, int(card_gap_x * scale))
+            gen_gap_y = max(10, int(gen_gap_y * scale))
+        else:
+            # Слишком мало места — многостраничность
+            _draw_multipage_tree(c, members, width, height, active_gens, generations, settings)
+            return
+
+    # --- Одностраничная отрисовка ---
+    draw_beautiful_background(c, width, height)
+    header_height = draw_header(c, width, height, title)
 
     card_positions = {}
-    current_y = start_y
+    current_y = height - header_height - 15
 
     for gen_idx, (gen_key, gen_name) in enumerate(active_gens):
         gen_members = generations[gen_key]
 
-        # Заголовок поколения
-        current_y -= 20
-        draw_gen_label(c, gen_name, width, current_y + 5)
+        # Метка поколения
+        current_y -= gen_label_h
+        draw_gen_label(c, gen_name, width, current_y + 8)
+        current_y -= 4
 
-        current_y -= 5
+        # Разбиваем на ряды
+        rows = []
+        for i in range(0, len(gen_members), max_cards_per_row):
+            rows.append(gen_members[i:i + max_cards_per_row])
 
-        # Карточки
-        num_members = len(gen_members)
-        total_cards_width = num_members * card_width + (num_members - 1) * card_gap_x
-        start_x = (width - total_cards_width) / 2
+        for row in rows:
+            num = len(row)
+            total_w = num * card_width + (num - 1) * card_gap_x
+            start_x = (width - total_w) / 2
 
-        for i, member in enumerate(gen_members):
-            x = start_x + i * (card_width + card_gap_x)
-            y = current_y - card_height
+            for i, member in enumerate(row):
+                x = start_x + i * (card_width + card_gap_x)
+                y = current_y - card_height
 
-            draw_member_card(c, member, x, y, card_width, card_height)
+                draw_member_card(c, member, x, y, card_width, card_height, settings)
 
-            member_id = member.get('id')
-            card_positions[member_id] = {
-                'x_center': x + card_width / 2,
-                'y_top': y + card_height,
-                'y_bottom': y,
-                'y_center': y + card_height / 2
-            }
+                member_id = member.get('id')
+                card_positions[member_id] = {
+                    'x_center': x + card_width / 2,
+                    'y_top': y + card_height,
+                    'y_bottom': y,
+                    'y_center': y + card_height / 2
+                }
 
-        current_y -= card_height + gen_gap_y
+            current_y -= card_height + 8
 
-    # Линии связей (рисуем поверх)
+        current_y -= gen_gap_y
+
     draw_connections(c, card_positions, members)
-
-    # Футер
     draw_footer(c, width)
+
+
+def _draw_multipage_tree(c, members, width, height, active_gens, generations, settings):
+    """Многостраничная отрисовка когда не помещается на одну страницу"""
+    title = settings.get('title', 'Семейное Древо')
+    margin_x = 40
+    usable_width = width - 2 * margin_x
+    header_h = 80
+    footer_h = 40
+
+    # Размеры карточек для многостраничного режима - побольше
+    max_in_row_raw = max(len(generations[k]) for k, _ in active_gens)
+    max_cards_per_row = max(1, int((usable_width + 12) / (110 + 12)))
+    card_width = min(140, max(100, (usable_width - (min(max_in_row_raw, max_cards_per_row) - 1) * 15) / min(max_in_row_raw, max_cards_per_row)))
+    card_gap_x = min(20, max(10, card_width * 0.12))
+    card_height = int(card_width * 1.12)
+    if not settings.get('show_photos', True):
+        card_height = int(card_width * 0.7)
+    gen_gap_y = 25
+    gen_label_h = 28
+
+    page_num = 0
+
+    # Собираем все ряды: [(gen_name, row_members)]
+    all_rows = []
+    for gen_key, gen_name in active_gens:
+        gen_members = generations[gen_key]
+        rows_data = []
+        for i in range(0, len(gen_members), max_cards_per_row):
+            rows_data.append(gen_members[i:i + max_cards_per_row])
+        all_rows.append((gen_name, rows_data))
+
+    card_positions = {}
+    row_index = 0
+    gen_index = 0
+
+    while gen_index < len(all_rows):
+        # Новая страница
+        if page_num > 0:
+            c.showPage()
+        draw_beautiful_background(c, width, height)
+
+        if page_num == 0:
+            cur_y = height - draw_header(c, width, height, title) - 10
+        else:
+            draw_header(c, width, height, f"{title} (стр. {page_num + 1})")
+            cur_y = height - header_h - 10
+
+        page_bottom = footer_h + 20
+
+        while gen_index < len(all_rows):
+            gen_name, rows_data = all_rows[gen_index]
+
+            # Проверяем, поместится ли хотя бы метка + 1 ряд
+            needed = gen_label_h + card_height + 8
+            if cur_y - needed < page_bottom and cur_y < height - header_h - 50:
+                break  # Следующая страница
+
+            # Метка поколения
+            cur_y -= gen_label_h
+            draw_gen_label(c, gen_name, width, cur_y + 8)
+            cur_y -= 4
+
+            while row_index < len(rows_data):
+                row = rows_data[row_index]
+                if cur_y - card_height - 8 < page_bottom:
+                    break  # Ряд не помещается
+
+                num = len(row)
+                total_w = num * card_width + (num - 1) * card_gap_x
+                start_x = (width - total_w) / 2
+
+                for i, member in enumerate(row):
+                    x = start_x + i * (card_width + card_gap_x)
+                    y = cur_y - card_height
+
+                    draw_member_card(c, member, x, y, card_width, card_height, settings)
+
+                    member_id = member.get('id')
+                    card_positions[member_id] = {
+                        'x_center': x + card_width / 2,
+                        'y_top': y + card_height,
+                        'y_bottom': y,
+                        'y_center': y + card_height / 2
+                    }
+
+                cur_y -= card_height + 8
+                row_index += 1
+
+            if row_index >= len(rows_data):
+                cur_y -= gen_gap_y
+                gen_index += 1
+                row_index = 0
+            else:
+                break  # Продолжим на следующей странице
+
+        draw_connections(c, card_positions, members)
+        draw_footer(c, width)
+        page_num += 1
 
 
 def draw_beautiful_background(c, width, height):
@@ -1201,7 +1409,7 @@ def draw_beautiful_background(c, width, height):
     c.line(width - margin - 3, margin + 3, width - margin - 3 - corner_len, margin + 3)
 
 
-def draw_header(c, width, height):
+def draw_header(c, width, height, title='Семейное Древо'):
     """Заголовок документа с рукописным шрифтом"""
     header_h = 80
 
@@ -1209,27 +1417,30 @@ def draw_header(c, width, height):
     banner_y = height - header_h + 10
     banner_h = 60
 
+    # Ширина баннера зависит от длины заголовка
+    title_pixel_w = len(title) * 14 + 80
+    banner_w = max(400, min(width - 80, title_pixel_w))
+
     # Фон баннера - пергамент
     c.setFillColorRGB(0.95, 0.92, 0.85)
-    c.roundRect(width/2 - 200, banner_y, 400, banner_h, 10, fill=1, stroke=0)
+    c.roundRect(width/2 - banner_w/2, banner_y, banner_w, banner_h, 10, fill=1, stroke=0)
 
     # Рамка баннера
     c.setStrokeColorRGB(0.6, 0.5, 0.3)
     c.setLineWidth(2)
-    c.roundRect(width/2 - 200, banner_y, 400, banner_h, 10, fill=0, stroke=1)
+    c.roundRect(width/2 - banner_w/2, banner_y, banner_w, banner_h, 10, fill=0, stroke=1)
 
     # Декоративные завитки по бокам
     c.setStrokeColorRGB(0.5, 0.4, 0.2)
     c.setLineWidth(1.5)
-    # Левый завиток
-    c.arc(width/2 - 210, banner_y + 15, width/2 - 190, banner_y + 45, 90, 180)
-    # Правый завиток
-    c.arc(width/2 + 190, banner_y + 15, width/2 + 210, banner_y + 45, 270, 180)
+    c.arc(width/2 - banner_w/2 - 10, banner_y + 15, width/2 - banner_w/2 + 10, banner_y + 45, 90, 180)
+    c.arc(width/2 + banner_w/2 - 10, banner_y + 15, width/2 + banner_w/2 + 10, banner_y + 45, 270, 180)
 
-    # Заголовок курсивом (с поддержкой кириллицы)
-    c.setFillColorRGB(0.3, 0.2, 0.1)  # Тёмно-коричневый
-    c.setFont(FONT_BOLD, 32)
-    c.drawCentredString(width / 2, banner_y + 22, "Семейное Древо")
+    # Заголовок — адаптивный размер шрифта
+    font_size = min(32, max(18, int(banner_w / max(len(title), 1) * 1.6)))
+    c.setFillColorRGB(0.3, 0.2, 0.1)
+    c.setFont(FONT_BOLD, font_size)
+    c.drawCentredString(width / 2, banner_y + 22, title)
 
     # Подзаголовок
     c.setFont(FONT_REGULAR, 10)
@@ -1276,96 +1487,118 @@ def draw_gen_label(c, name, width, y):
     c.drawCentredString(width / 2, y - 3, name)
 
 
-def draw_member_card(c, member, x, y, w, h):
-    """Карточка члена семьи в стиле старинной рамки"""
+def draw_member_card(c, member, x, y, w, h, settings=None):
+    """Карточка члена семьи — адаптивная под размер и настройки"""
+    if settings is None:
+        settings = {}
+
+    show_photos = settings.get('show_photos', True)
+    show_dates = settings.get('show_dates', True)
+    show_patronymic = settings.get('show_patronymic', True)
+
+    # Масштаб шрифта пропорционален ширине карточки (базовая: 130)
+    s = w / 130.0
 
     # Тень
     c.setFillColorRGB(0.7, 0.65, 0.55)
     c.roundRect(x + 3, y - 3, w, h, 8, fill=1, stroke=0)
 
-    # Основа карточки - пергамент
+    # Основа карточки
     c.setFillColorRGB(0.98, 0.96, 0.90)
     c.roundRect(x, y, w, h, 8, fill=1, stroke=0)
 
-    # Внешняя рамка - золотисто-коричневая
+    # Внешняя рамка
     c.setStrokeColorRGB(0.6, 0.5, 0.3)
-    c.setLineWidth(2)
+    c.setLineWidth(max(1, 2 * s))
     c.roundRect(x, y, w, h, 8, fill=0, stroke=1)
 
-    # Внутренняя декоративная рамка
+    # Внутренняя рамка
     c.setStrokeColorRGB(0.75, 0.65, 0.45)
     c.setLineWidth(1)
-    c.roundRect(x + 4, y + 4, w - 8, h - 8, 5, fill=0, stroke=1)
+    inset = max(3, int(4 * s))
+    c.roundRect(x + inset, y + inset, w - 2*inset, h - 2*inset, 5, fill=0, stroke=1)
 
     # Декоративные уголки
-    corner_size = 12
+    corner_size = max(6, int(12 * s))
+    edge = max(5, int(8 * s))
     c.setFillColorRGB(0.6, 0.5, 0.3)
-    # Верхний левый
-    c.line(x + 8, y + h - 8, x + 8, y + h - 8 - corner_size)
-    c.line(x + 8, y + h - 8, x + 8 + corner_size, y + h - 8)
-    # Верхний правый
-    c.line(x + w - 8, y + h - 8, x + w - 8, y + h - 8 - corner_size)
-    c.line(x + w - 8, y + h - 8, x + w - 8 - corner_size, y + h - 8)
-    # Нижний левый
-    c.line(x + 8, y + 8, x + 8, y + 8 + corner_size)
-    c.line(x + 8, y + 8, x + 8 + corner_size, y + 8)
-    # Нижний правый
-    c.line(x + w - 8, y + 8, x + w - 8, y + 8 + corner_size)
-    c.line(x + w - 8, y + 8, x + w - 8 - corner_size, y + 8)
+    c.line(x + edge, y + h - edge, x + edge, y + h - edge - corner_size)
+    c.line(x + edge, y + h - edge, x + edge + corner_size, y + h - edge)
+    c.line(x + w - edge, y + h - edge, x + w - edge, y + h - edge - corner_size)
+    c.line(x + w - edge, y + h - edge, x + w - edge - corner_size, y + h - edge)
+    c.line(x + edge, y + edge, x + edge, y + edge + corner_size)
+    c.line(x + edge, y + edge, x + edge + corner_size, y + edge)
+    c.line(x + w - edge, y + edge, x + w - edge, y + edge + corner_size)
+    c.line(x + w - edge, y + edge, x + w - edge - corner_size, y + edge)
 
-    curr_y = y + h - 15
+    curr_y = y + h - max(8, int(10 * s))
 
-    # Фото (уменьшено для лучшего размещения)
-    photo_size = 45
-    photo_x = x + (w - photo_size) / 2
-    photo_y = curr_y - photo_size
+    # Фото
+    if show_photos:
+        photo_size = max(25, int(w * 0.38))
+        photo_x = x + (w - photo_size) / 2
+        photo_y = curr_y - photo_size
 
-    photo_data = member.get('photoBase64')
-    if photo_data:
-        try:
-            draw_photo(c, photo_data, photo_x, photo_y, photo_size)
-        except Exception as e:
-            logger.warning(f"Фото ошибка: {e}")
+        photo_data = member.get('photoBase64')
+        if photo_data:
+            try:
+                draw_photo(c, photo_data, photo_x, photo_y, photo_size)
+            except Exception as e:
+                logger.warning(f"Фото ошибка: {e}")
+                draw_avatar(c, photo_x, photo_y, photo_size)
+        else:
             draw_avatar(c, photo_x, photo_y, photo_size)
-    else:
-        draw_avatar(c, photo_x, photo_y, photo_size)
 
-    # Увеличенный отступ от фото до текста
-    curr_y = photo_y - 12
+        curr_y = photo_y - max(4, int(5 * s))
 
-    # Имя - тёмно-коричневым
+    # Адаптивные размеры шрифтов
+    name_font = max(7, min(11, int(9 * s)))
+    detail_font = max(6, min(9, int(8 * s)))
+    role_font = max(7, min(11, int(10 * s)))
+
+    # Функция-обрезчик по ширине
+    max_text_w = w - 2 * inset - 4
+    def fit_text(text, font_name, font_size):
+        c.setFont(font_name, font_size)
+        tw = c.stringWidth(text, font_name, font_size)
+        if tw <= max_text_w:
+            return text
+        while len(text) > 3 and c.stringWidth(text + "..", font_name, font_size) > max_text_w:
+            text = text[:-1]
+        return text + ".."
+
+    # Имя
     c.setFillColorRGB(0.25, 0.2, 0.1)
-    c.setFont(FONT_BOLD, 9)
-
     name = f"{member.get('lastName', '')} {member.get('firstName', '')}"
-    if len(name) > 18:
-        name = name[:16] + ".."
+    name = fit_text(name, FONT_BOLD, name_font)
+    c.setFont(FONT_BOLD, name_font)
     c.drawCentredString(x + w/2, curr_y, name)
-    curr_y -= 10
+    curr_y -= name_font + 2
 
     # Отчество
-    patronymic = member.get('patronymic', '')
-    if patronymic:
-        c.setFont(FONT_REGULAR, 8)
-        c.setFillColorRGB(0.4, 0.35, 0.25)
-        if len(patronymic) > 18:
-            patronymic = patronymic[:16] + ".."
-        c.drawCentredString(x + w/2, curr_y, patronymic)
-        curr_y -= 9
+    if show_patronymic:
+        patronymic = member.get('patronymic', '')
+        if patronymic:
+            c.setFillColorRGB(0.4, 0.35, 0.25)
+            patronymic = fit_text(patronymic, FONT_REGULAR, detail_font)
+            c.setFont(FONT_REGULAR, detail_font)
+            c.drawCentredString(x + w/2, curr_y, patronymic)
+            curr_y -= detail_font + 1
 
-    # Роль - курсивом, зелёным (с поддержкой кириллицы)
+    # Роль
     role = get_role_name(member.get('role', 'OTHER'))
-    c.setFillColorRGB(0.2, 0.5, 0.3)  # Тёмно-зелёный
-    c.setFont(FONT_ITALIC, 10)
+    c.setFillColorRGB(0.2, 0.5, 0.3)
+    c.setFont(FONT_ITALIC, role_font)
     c.drawCentredString(x + w/2, curr_y, role)
-    curr_y -= 12
+    curr_y -= role_font + 1
 
-    # Дата - мелким шрифтом
-    birth = member.get('birthDate', '')
-    if birth:
-        c.setFillColorRGB(0.5, 0.45, 0.35)
-        c.setFont(FONT_REGULAR, 8)
-        c.drawCentredString(x + w/2, curr_y, f"✦ {birth} ✦")
+    # Дата
+    if show_dates:
+        birth = member.get('birthDate', '')
+        if birth:
+            c.setFillColorRGB(0.5, 0.45, 0.35)
+            c.setFont(FONT_REGULAR, detail_font)
+            c.drawCentredString(x + w/2, curr_y, birth)
 
 
 def draw_photo(c, photo_data, x, y, size):
