@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
+import logoIcon from '@/assets/icon.png'
 
 const apiStatus = ref(null)
 const apiLatency = ref(null)
@@ -128,7 +129,7 @@ const techStack = [
     <nav class="navbar animate-in">
       <div class="container nav-inner">
         <div class="nav-brand">
-          <svg class="nav-logo" viewBox="0 0 32 32" fill="none"><circle cx="16" cy="10" r="4" stroke="currentColor" stroke-width="2"/><path d="M8 28c0-4.4 3.6-8 8-8s8 3.6 8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="6" cy="16" r="3" stroke="currentColor" stroke-width="1.5" opacity=".5"/><circle cx="26" cy="16" r="3" stroke="currentColor" stroke-width="1.5" opacity=".5"/></svg>
+          <img :src="logoIcon" alt="FamilyOne Logo" class="nav-logo" />
           <span>FamilyOne</span>
         </div>
         <div class="nav-links">
@@ -338,7 +339,7 @@ const techStack = [
     <footer class="footer">
       <div class="container footer-inner">
         <div class="footer-brand">
-          <svg class="nav-logo" viewBox="0 0 32 32" fill="none"><circle cx="16" cy="10" r="4" stroke="currentColor" stroke-width="2"/><path d="M8 28c0-4.4 3.6-8 8-8s8 3.6 8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <img :src="logoIcon" alt="FamilyOne Logo" class="nav-logo" />
           <span>FamilyOne — Семейное Древо</span>
         </div>
         <p class="footer-copy">© 2026 Дипломный проект. Все права защищены.</p>
@@ -397,7 +398,7 @@ const techStack = [
   font-weight: 600; font-size: 1.1rem;
   color: var(--color-text);
 }
-.nav-logo { width: 28px; height: 28px; color: var(--color-accent-light); }
+.nav-logo { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
 .nav-links { display: flex; gap: 28px; }
 .nav-links a {
   color: var(--color-text-secondary); font-size: 0.88rem; font-weight: 500;
