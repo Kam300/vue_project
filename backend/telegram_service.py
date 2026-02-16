@@ -6,7 +6,6 @@ Combined Server для приложения Семейное Древо
 
 from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
-import face_recognition
 import numpy as np
 import base64
 import io
@@ -46,6 +45,57 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 
 
+_DLL_DIR_HANDLES = []
+
+
+def configure_windows_dll_dirs():
+    """Register CUDA/cuDNN DLL directories before importing dlib/face_recognition."""
+    if os.name != 'nt' or not hasattr(os, 'add_dll_directory'):
+        return
+
+    repo_root = BASE_DIR.parent
+    candidates = []
+
+    cuda_env = os.environ.get('CUDA_PATH')
+    if cuda_env:
+        cuda_env_path = Path(cuda_env)
+        candidates.extend([cuda_env_path / 'bin' / 'x64', cuda_env_path / 'bin'])
+
+    cuda_root = Path(r'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA')
+    if cuda_root.exists():
+        cuda_versions = sorted(cuda_root.glob('v*'), key=lambda path: path.name, reverse=True)
+        if cuda_versions:
+            candidates.extend([cuda_versions[0] / 'bin' / 'x64', cuda_versions[0] / 'bin'])
+
+    candidates.extend([
+        repo_root / '.runtime' / 'cudnn-cu13-extracted' / 'cudnn-windows-x86_64-9.19.0.56_cuda13-archive' / 'bin' / 'x64',
+        BASE_DIR / '.venv' / 'Lib' / 'site-packages' / 'nvidia' / 'cu13' / 'bin' / 'x86_64',
+        BASE_DIR / '.venv' / 'Lib' / 'site-packages' / 'nvidia' / 'cudnn' / 'bin',
+        BASE_DIR / '.venv' / 'Lib' / 'site-packages' / 'nvidia' / 'cudnn' / 'bin' / 'x64',
+    ])
+
+    seen = set()
+    path_entries = []
+    for candidate in candidates:
+        candidate_str = str(candidate)
+        if candidate_str in seen or not candidate.exists():
+            continue
+        seen.add(candidate_str)
+        path_entries.append(candidate_str)
+        try:
+            _DLL_DIR_HANDLES.append(os.add_dll_directory(candidate_str))
+        except OSError:
+            continue
+
+    if path_entries:
+        current_path = os.environ.get('PATH', '')
+        os.environ['PATH'] = ';'.join(path_entries) + ';' + current_path
+
+
+configure_windows_dll_dirs()
+import face_recognition
+
+
 def load_env_file(env_path):
     """Загружает .env без внешних зависимостей."""
     if not env_path.exists():
@@ -71,6 +121,21 @@ def env_int(name, default):
     except ValueError:
         logger.warning(f"Некорректное значение {name}={raw!r}, используется {default}")
         return default
+
+
+def env_bool(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+
+    normalized = raw.strip().lower()
+    if normalized in {'1', 'true', 'yes', 'on'}:
+        return True
+    if normalized in {'0', 'false', 'no', 'off'}:
+        return False
+
+    logger.warning(f"Invalid boolean value {name}={raw!r}, using default {default}")
+    return default
 
 
 def resolve_backend_path(path_value):
@@ -160,7 +225,48 @@ face_encodings_db = {}
 # 'cnn' - использует GPU (CUDA), более точный но требует GPU
 # 'hog' - использует CPU, быстрее на CPU но менее точный
 USE_CUDA = True  # Отключено для скорости (HOG быстрее на CPU)
+USE_CUDA = env_bool('USE_CUDA', USE_CUDA)
 FACE_MODEL = 'cnn' if USE_CUDA else 'hog'
+
+
+def detect_cuda_runtime():
+    """Detects real CUDA availability in dlib on this host."""
+    result = {
+        'dlib_use_cuda': False,
+        'cuda_device_count': 0,
+        'cuda_enabled': False,
+        'reason': ''
+    }
+
+    try:
+        import dlib
+    except Exception as exc:
+        result['reason'] = f'dlib import error: {exc}'
+        return result
+
+    result['dlib_use_cuda'] = bool(getattr(dlib, 'DLIB_USE_CUDA', False))
+    try:
+        result['cuda_device_count'] = int(dlib.cuda.get_num_devices())
+    except Exception as exc:
+        result['reason'] = f'cuda device check error: {exc}'
+        result['cuda_device_count'] = 0
+
+    result['cuda_enabled'] = result['dlib_use_cuda'] and result['cuda_device_count'] > 0
+    if not result['cuda_enabled'] and not result['reason']:
+        if not result['dlib_use_cuda']:
+            result['reason'] = 'dlib built without CUDA support'
+        elif result['cuda_device_count'] <= 0:
+            result['reason'] = 'no CUDA devices available for dlib'
+
+    return result
+
+
+CUDA_RUNTIME = detect_cuda_runtime()
+CUDA_ENABLED = USE_CUDA and CUDA_RUNTIME['cuda_enabled']
+DLIB_USE_CUDA = CUDA_RUNTIME['dlib_use_cuda']
+CUDA_DEVICE_COUNT = CUDA_RUNTIME['cuda_device_count']
+CUDA_DISABLED_REASON = CUDA_RUNTIME['reason']
+FACE_MODEL = 'cnn' if CUDA_ENABLED else 'hog'
 
 # Количество раз для повышения разрешения при поиске лиц (0 = без увеличения)
 # Увеличение замедляет работу, но находит мелкие лица
@@ -180,7 +286,16 @@ MAX_IMAGE_SIZE = 400  # Уменьшено для быстрой обработ�
 face_detection_cache = {}
 CACHE_MAX_SIZE = 100
 
-logger.info(f"Face Recognition настроен: model={FACE_MODEL}, CUDA={'включен' if USE_CUDA else 'выключен'}")
+logger.info(f"Face Recognition настроен: model={FACE_MODEL}, CUDA={'включен' if CUDA_ENABLED else 'выключен'}")
+if USE_CUDA and not CUDA_ENABLED:
+    logger.warning(
+        f"CUDA requested but unavailable, fallback to CPU/HOG. "
+        f"dlib_cuda={DLIB_USE_CUDA}, devices={CUDA_DEVICE_COUNT}, reason={CUDA_DISABLED_REASON}"
+    )
+logger.info(
+    f"Face runtime: requested_cuda={USE_CUDA}, active_cuda={CUDA_ENABLED}, "
+    f"dlib_cuda={DLIB_USE_CUDA}, cuda_devices={CUDA_DEVICE_COUNT}, model={FACE_MODEL}"
+)
 
 # ========================================
 # PDF - Конфигурация
@@ -572,7 +687,15 @@ def health_check():
         'face_recognition': True,
         'pdf_generation': True,
         'members_count': len(face_encodings_db),
-        'recent_events': events_list
+        'recent_events': events_list,
+        'gpu': {
+            'requested_cuda': USE_CUDA,
+            'active_cuda': CUDA_ENABLED,
+            'dlib_use_cuda': DLIB_USE_CUDA,
+            'cuda_devices': CUDA_DEVICE_COUNT,
+            'face_model': FACE_MODEL,
+            'reason': '' if CUDA_ENABLED else CUDA_DISABLED_REASON
+        }
     })
 
 
@@ -1869,7 +1992,10 @@ if __name__ == '__main__':
     logger.info(f"Combined Server запущен на {API_HOST}:{API_PORT}")
     logger.info("Face Recognition + PDF Generation")
     logger.info(f"Загружено {len(face_encodings_db)} лиц")
-    logger.info(f"CUDA: {'включен' if USE_CUDA else 'выключен'}")
+    logger.info(
+        f"CUDA: {'включен' if CUDA_ENABLED else 'выключен'} "
+        f"(requested={USE_CUDA}, dlib_cuda={DLIB_USE_CUDA}, devices={CUDA_DEVICE_COUNT})"
+    )
     logger.info(f"CORS origins: {', '.join(CORS_ORIGINS)}")
     logger.info(f"MAX_CONTENT_LENGTH: {MAX_CONTENT_LENGTH_MB} MB")
     logger.info("=" * 50)
