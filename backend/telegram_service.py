@@ -9,7 +9,7 @@ from flask_cors import CORS
 import numpy as np
 import base64
 import io
-from PIL import Image
+from PIL import Image, ImageOps
 import os
 import json
 import logging
@@ -268,10 +268,10 @@ CUDA_DEVICE_COUNT = CUDA_RUNTIME['cuda_device_count']
 CUDA_DISABLED_REASON = CUDA_RUNTIME['reason']
 FACE_MODEL = 'cnn' if CUDA_ENABLED else 'hog'
 
-# Количество раз для повышения разрешения при поиске лиц (0 = без увеличения)
-# Увеличение замедляет работу, но находит мелкие лица
-# Для скорости с GPU можно оставить 0 или 1
-NUMBER_OF_TIMES_TO_UPSAMPLE = 0
+# Количество раз для повышения разрешения при поиске лиц
+# 1 обычно заметно повышает детекцию на портретных фото с телефона
+NUMBER_OF_TIMES_TO_UPSAMPLE = max(0, env_int('FACE_UPSAMPLE', 1))
+FALLBACK_UPSAMPLE = max(NUMBER_OF_TIMES_TO_UPSAMPLE, env_int('FACE_UPSAMPLE_FALLBACK', 2))
 
 # Количество jitters при кодировании лица (больше = точнее, но медленнее)
 # 1 = быстро, 100 = очень точно но медленно
@@ -280,7 +280,11 @@ NUM_JITTERS = 1  # 1 = быстро, уменьшено для скорости
 
 # Дополнительные оптимизации для GPU
 BATCH_SIZE = 128  # Размер батча для обработки (больше = быстрее на GPU)
-MAX_IMAGE_SIZE = 400  # Уменьшено для быстрой обработки
+MAX_IMAGE_SIZE = max(400, env_int('MAX_IMAGE_SIZE', 1920))
+DECODE_MAX_IMAGE_SIZE = max(MAX_IMAGE_SIZE, env_int('DECODE_MAX_IMAGE_SIZE', 2560))
+DETECTION_UPSCALE_FACTORS = (1.6, 2.0, 2.6)
+CROP_UPSCALE_FACTORS = (1.4, 1.8, 2.2)
+EXTRA_UPSAMPLE_MAX_PIXELS = max(300000, env_int('EXTRA_UPSAMPLE_MAX_PIXELS', 1400000))
 
 # Кэш для ускорения повторных запросов
 face_detection_cache = {}
@@ -581,35 +585,393 @@ def optimize_image_for_gpu(image):
 
 def detect_faces_optimized(image):
     """Оптимизированное обнаружение лиц с кэшированием"""
-    # Проверяем кэш
     img_hash = get_image_hash(image)
     if img_hash in face_detection_cache:
         logger.info("Использован кэш для обнаружения лиц")
         return face_detection_cache[img_hash]
 
-    # Оптимизируем изображение
     optimized_image = optimize_image_for_gpu(image)
 
-    # Обнаруживаем лица
-    start_time = time.time()
-    face_locations = face_recognition.face_locations(
+    source_height, source_width = image.shape[:2]
+    optimized_height, optimized_width = optimized_image.shape[:2]
+    optimization_scale = 1.0
+    if source_width > 0 and source_height > 0:
+        width_ratio = optimized_width / source_width
+        height_ratio = optimized_height / source_height
+        optimization_scale = max(1e-6, min(width_ratio, height_ratio))
+
+    if optimization_scale != 1.0:
+        logger.info(
+            f"Face detection scale: source={source_width}x{source_height}, "
+            f"optimized={optimized_width}x{optimized_height}, ratio={optimization_scale:.4f}"
+        )
+
+    def run_face_detection(image_array, model_name, upsample_value, attempt_name):
+        start_time = time.time()
+        locations = face_recognition.face_locations(
+            image_array,
+            model=model_name,
+            number_of_times_to_upsample=upsample_value
+        )
+        detection_time = time.time() - start_time
+        logger.info(
+            f"Обнаружение лиц [{attempt_name}]: {detection_time:.3f}s, "
+            f"model={model_name}, upsample={upsample_value}, найдено={len(locations)}"
+        )
+        return locations
+
+    def clamp_location(location):
+        top, right, bottom, left = location
+        top = max(0, min(source_height, int(round(top))))
+        right = max(0, min(source_width, int(round(right))))
+        bottom = max(0, min(source_height, int(round(bottom))))
+        left = max(0, min(source_width, int(round(left))))
+        if bottom <= top or right <= left:
+            return None
+        return top, right, bottom, left
+
+    def upscale_image(image_array, scale):
+        height, width = image_array.shape[:2]
+        target_width = max(1, int(round(width * scale)))
+        target_height = max(1, int(round(height * scale)))
+        pil_image = Image.fromarray(image_array)
+        upscaled = pil_image.resize((target_width, target_height), Image.LANCZOS)
+        return np.array(upscaled)
+
+    def detect_and_map(image_array, model_name, upsample_value, attempt_name, scale=1.0, offset_top=0, offset_left=0):
+        detected_locations = run_face_detection(image_array, model_name, upsample_value, attempt_name)
+        if len(detected_locations) == 0:
+            return []
+
+        mapped_locations = []
+        for top, right, bottom, left in detected_locations:
+            mapped = clamp_location((
+                (top / scale + offset_top) / optimization_scale,
+                (right / scale + offset_left) / optimization_scale,
+                (bottom / scale + offset_top) / optimization_scale,
+                (left / scale + offset_left) / optimization_scale
+            ))
+            if mapped is not None:
+                mapped_locations.append(mapped)
+
+        return mapped_locations
+
+    def detect_on_source(image_array, model_name, upsample_value, attempt_name, scale=1.0, offset_top=0, offset_left=0):
+        detected_locations = run_face_detection(image_array, model_name, upsample_value, attempt_name)
+        if len(detected_locations) == 0:
+            return []
+
+        mapped_locations = []
+        for top, right, bottom, left in detected_locations:
+            mapped = clamp_location((
+                top / scale + offset_top,
+                right / scale + offset_left,
+                bottom / scale + offset_top,
+                left / scale + offset_left
+            ))
+            if mapped is not None:
+                mapped_locations.append(mapped)
+
+        return mapped_locations
+
+    def map_location_from_rotated(location, rotation_k, original_height, original_width):
+        top, right, bottom, left = location
+        if bottom <= top or right <= left:
+            return None
+
+        corners = [
+            (top, left),
+            (top, right - 1),
+            (bottom - 1, left),
+            (bottom - 1, right - 1)
+        ]
+
+        mapped_points = []
+        for y, x in corners:
+            if rotation_k == 1:
+                mapped_y, mapped_x = x, original_width - 1 - y
+            elif rotation_k == 2:
+                mapped_y, mapped_x = original_height - 1 - y, original_width - 1 - x
+            elif rotation_k == 3:
+                mapped_y, mapped_x = original_height - 1 - x, y
+            else:
+                mapped_y, mapped_x = y, x
+            mapped_points.append((mapped_y, mapped_x))
+
+        ys = [item[0] for item in mapped_points]
+        xs = [item[1] for item in mapped_points]
+        mapped_top = min(ys)
+        mapped_bottom = max(ys) + 1
+        mapped_left = min(xs)
+        mapped_right = max(xs) + 1
+
+        if mapped_bottom <= mapped_top or mapped_right <= mapped_left:
+            return None
+
+        mapped_top = max(0, min(original_height, mapped_top))
+        mapped_right = max(0, min(original_width, mapped_right))
+        mapped_bottom = max(0, min(original_height, mapped_bottom))
+        mapped_left = max(0, min(original_width, mapped_left))
+
+        if mapped_bottom <= mapped_top or mapped_right <= mapped_left:
+            return None
+
+        return mapped_top, mapped_right, mapped_bottom, mapped_left
+
+    def detect_rotated_and_map(image_array, rotation_k, model_name, upsample_value, attempt_name, map_scale):
+        rotated_image = np.ascontiguousarray(np.rot90(image_array, k=rotation_k))
+        detected_locations = run_face_detection(rotated_image, model_name, upsample_value, attempt_name)
+        if len(detected_locations) == 0:
+            return []
+
+        map_scale = max(1e-6, map_scale)
+        image_height, image_width = image_array.shape[:2]
+        mapped_locations = []
+        for location in detected_locations:
+            unrotated_location = map_location_from_rotated(
+                location,
+                rotation_k=rotation_k,
+                original_height=image_height,
+                original_width=image_width
+            )
+            if unrotated_location is None:
+                continue
+
+            mapped = clamp_location((
+                unrotated_location[0] / map_scale,
+                unrotated_location[1] / map_scale,
+                unrotated_location[2] / map_scale,
+                unrotated_location[3] / map_scale
+            ))
+            if mapped is not None:
+                mapped_locations.append(mapped)
+
+        return mapped_locations
+
+    face_locations = detect_and_map(
         optimized_image,
-        model=FACE_MODEL,
-        number_of_times_to_upsample=NUMBER_OF_TIMES_TO_UPSAMPLE
+        FACE_MODEL,
+        NUMBER_OF_TIMES_TO_UPSAMPLE,
+        'primary'
     )
-    detection_time = time.time() - start_time
 
-    logger.info(f"Обнаружение лиц: {detection_time:.3f}s, найдено: {len(face_locations)}")
+    if len(face_locations) == 0 and FALLBACK_UPSAMPLE > NUMBER_OF_TIMES_TO_UPSAMPLE:
+        face_locations = detect_and_map(
+            optimized_image,
+            FACE_MODEL,
+            FALLBACK_UPSAMPLE,
+            'fallback-upsample'
+        )
 
-    # Сохраняем в кэш
+    if len(face_locations) == 0 and FACE_MODEL == 'cnn':
+        face_locations = detect_and_map(
+            optimized_image,
+            'hog',
+            FALLBACK_UPSAMPLE,
+            'fallback-hog'
+        )
+
+    # Retry on auto-contrast frame for low-contrast portraits.
+    if len(face_locations) == 0:
+        contrasted = np.array(ImageOps.autocontrast(Image.fromarray(optimized_image), cutoff=1))
+        if contrasted.shape == optimized_image.shape:
+            face_locations = detect_and_map(
+                contrasted,
+                FACE_MODEL,
+                FALLBACK_UPSAMPLE,
+                'fallback-autocontrast'
+            )
+            if len(face_locations) == 0 and FACE_MODEL == 'cnn':
+                face_locations = detect_and_map(
+                    contrasted,
+                    'hog',
+                    FALLBACK_UPSAMPLE,
+                    'fallback-autocontrast-hog'
+                )
+
+    if len(face_locations) == 0:
+        for scale in DETECTION_UPSCALE_FACTORS:
+            upscaled_image = upscale_image(optimized_image, scale)
+            for upsample_value in (0, 1):
+                face_locations = detect_and_map(
+                    upscaled_image,
+                    FACE_MODEL,
+                    upsample_value,
+                    f'fallback-upscaled-{scale}-u{upsample_value}',
+                    scale=scale
+                )
+                if len(face_locations) > 0:
+                    break
+
+                if FACE_MODEL == 'cnn':
+                    face_locations = detect_and_map(
+                        upscaled_image,
+                        'hog',
+                        upsample_value,
+                        f'fallback-upscaled-hog-{scale}-u{upsample_value}',
+                        scale=scale
+                    )
+                    if len(face_locations) > 0:
+                        break
+
+            if len(face_locations) > 0:
+                break
+
+    if len(face_locations) == 0:
+        crop_specs = [
+            ('center', 0.08, 0.12, 0.92, 0.88),
+            ('upper_center', 0.00, 0.12, 0.78, 0.88),
+        ]
+        for crop_name, top_ratio, left_ratio, bottom_ratio, right_ratio in crop_specs:
+            top = int(optimized_height * top_ratio)
+            left = int(optimized_width * left_ratio)
+            bottom = int(optimized_height * bottom_ratio)
+            right = int(optimized_width * right_ratio)
+            crop = optimized_image[top:bottom, left:right]
+            if crop.size == 0:
+                continue
+
+            for scale in CROP_UPSCALE_FACTORS:
+                upscaled_crop = upscale_image(crop, scale)
+                for upsample_value in (0, 1):
+                    face_locations = detect_and_map(
+                        upscaled_crop,
+                        FACE_MODEL,
+                        upsample_value,
+                        f'fallback-crop-{crop_name}-{scale}-u{upsample_value}',
+                        scale=scale,
+                        offset_top=top,
+                        offset_left=left
+                    )
+                    if len(face_locations) > 0:
+                        break
+
+                    if FACE_MODEL == 'cnn':
+                        face_locations = detect_and_map(
+                            upscaled_crop,
+                            'hog',
+                            upsample_value,
+                            f'fallback-crop-{crop_name}-hog-{scale}-u{upsample_value}',
+                            scale=scale,
+                            offset_top=top,
+                            offset_left=left
+                        )
+                        if len(face_locations) > 0:
+                            break
+
+                if len(face_locations) > 0:
+                    break
+
+            if len(face_locations) > 0:
+                break
+
+    if len(face_locations) == 0:
+        rotation_attempts = [
+            (1, 'rot90ccw'),
+            (3, 'rot90cw'),
+            (2, 'rot180'),
+        ]
+        optimized_pixels = optimized_height * optimized_width
+        rotation_upsamples = [FALLBACK_UPSAMPLE]
+        if FALLBACK_UPSAMPLE < 3 and optimized_pixels <= EXTRA_UPSAMPLE_MAX_PIXELS:
+            rotation_upsamples.append(FALLBACK_UPSAMPLE + 1)
+
+        for rotation_k, rotation_name in rotation_attempts:
+            for upsample_value in rotation_upsamples:
+                face_locations = detect_rotated_and_map(
+                    optimized_image,
+                    rotation_k=rotation_k,
+                    model_name=FACE_MODEL,
+                    upsample_value=upsample_value,
+                    attempt_name=f'fallback-{rotation_name}-u{upsample_value}',
+                    map_scale=optimization_scale
+                )
+                if len(face_locations) > 0:
+                    break
+
+                if FACE_MODEL == 'cnn':
+                    face_locations = detect_rotated_and_map(
+                        optimized_image,
+                        rotation_k=rotation_k,
+                        model_name='hog',
+                        upsample_value=upsample_value,
+                        attempt_name=f'fallback-{rotation_name}-hog-u{upsample_value}',
+                        map_scale=optimization_scale
+                    )
+                    if len(face_locations) > 0:
+                        break
+
+            if len(face_locations) > 0:
+                break
+
+    if len(face_locations) == 0 and optimization_scale < 0.999:
+        source_pixels = source_height * source_width
+        source_upsamples = [FALLBACK_UPSAMPLE]
+        if NUMBER_OF_TIMES_TO_UPSAMPLE not in source_upsamples:
+            source_upsamples.insert(0, NUMBER_OF_TIMES_TO_UPSAMPLE)
+        if FALLBACK_UPSAMPLE < 3 and source_pixels <= EXTRA_UPSAMPLE_MAX_PIXELS:
+            source_upsamples.append(FALLBACK_UPSAMPLE + 1)
+
+        for upsample_value in source_upsamples:
+            face_locations = detect_on_source(
+                image,
+                FACE_MODEL,
+                upsample_value,
+                f'fallback-fullres-u{upsample_value}'
+            )
+            if len(face_locations) > 0:
+                break
+
+            if FACE_MODEL == 'cnn':
+                face_locations = detect_on_source(
+                    image,
+                    'hog',
+                    upsample_value,
+                    f'fallback-fullres-hog-u{upsample_value}'
+                )
+                if len(face_locations) > 0:
+                    break
+
+        if len(face_locations) == 0:
+            rotation_attempts = [
+                (1, 'fullres-rot90ccw'),
+                (3, 'fullres-rot90cw'),
+                (2, 'fullres-rot180'),
+            ]
+            for rotation_k, rotation_name in rotation_attempts:
+                for upsample_value in source_upsamples:
+                    face_locations = detect_rotated_and_map(
+                        image,
+                        rotation_k=rotation_k,
+                        model_name=FACE_MODEL,
+                        upsample_value=upsample_value,
+                        attempt_name=f'fallback-{rotation_name}-u{upsample_value}',
+                        map_scale=1.0
+                    )
+                    if len(face_locations) > 0:
+                        break
+
+                    if FACE_MODEL == 'cnn':
+                        face_locations = detect_rotated_and_map(
+                            image,
+                            rotation_k=rotation_k,
+                            model_name='hog',
+                            upsample_value=upsample_value,
+                            attempt_name=f'fallback-{rotation_name}-hog-u{upsample_value}',
+                            map_scale=1.0
+                        )
+                        if len(face_locations) > 0:
+                            break
+
+                if len(face_locations) > 0:
+                    break
+
     if len(face_detection_cache) >= CACHE_MAX_SIZE:
-        # Удаляем старые записи
         oldest_key = next(iter(face_detection_cache))
         del face_detection_cache[oldest_key]
 
     face_detection_cache[img_hash] = face_locations
     return face_locations
-
 
 def decode_base64_image(base64_string):
     """Декодирование base64 изображения с оптимизацией для GPU"""
@@ -620,6 +982,7 @@ def decode_base64_image(base64_string):
 
         image_data = base64.b64decode(base64_string)
         image = Image.open(io.BytesIO(image_data))
+        image = ImageOps.exif_transpose(image)
 
         # Конвертируем в RGB если нужно
         if image.mode != 'RGB':
@@ -627,34 +990,8 @@ def decode_base64_image(base64_string):
 
         # Оптимизация размера для GPU - уменьшаем большие изображения
         width, height = image.size
-        if max(width, height) > MAX_IMAGE_SIZE:
-            ratio = MAX_IMAGE_SIZE / max(width, height)
-            new_width = int(width * ratio)
-            new_height = int(height * ratio)
-            image = image.resize((new_width, new_height), Image.LANCZOS)
-            logger.info(f"Изображение уменьшено с {width}x{height} до {new_width}x{new_height}")
-
-        return np.array(image)
-    except Exception as e:
-        logger.error(f"Ошибка декодирования изображения: {e}")
-        return None
-    """Декодирование base64 изображения с оптимизацией для GPU"""
-    try:
-        # Убираем префикс data:image если есть
-        if ',' in base64_string:
-            base64_string = base64_string.split(',')[1]
-
-        image_data = base64.b64decode(base64_string)
-        image = Image.open(io.BytesIO(image_data))
-
-        # Конвертируем в RGB если нужно
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-
-        # Оптимизация размера для GPU - уменьшаем большие изображения
-        width, height = image.size
-        if max(width, height) > MAX_IMAGE_SIZE:
-            ratio = MAX_IMAGE_SIZE / max(width, height)
+        if max(width, height) > DECODE_MAX_IMAGE_SIZE:
+            ratio = DECODE_MAX_IMAGE_SIZE / max(width, height)
             new_width = int(width * ratio)
             new_height = int(height * ratio)
             image = image.resize((new_width, new_height), Image.LANCZOS)

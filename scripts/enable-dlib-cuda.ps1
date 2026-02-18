@@ -205,12 +205,14 @@ function Prepare-PatchedDlibSource {
         }
     }
 
-    if (-not (Test-Path $sourceRoot)) {
-        Write-Step 'Extracting dlib source archive...'
-        & tar -xf $archivePath -C $extractRoot
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $sourceRoot)) {
-            throw 'Failed to extract dlib source archive.'
-        }
+    if (Test-Path $sourceRoot) {
+        Remove-Item -Recurse -Force $sourceRoot
+    }
+
+    Write-Step 'Extracting dlib source archive...'
+    & tar -xf $archivePath -C $extractRoot
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $sourceRoot)) {
+        throw 'Failed to extract dlib source archive.'
     }
 
     $testCmakeFiles = @(
@@ -226,7 +228,7 @@ function Prepare-PatchedDlibSource {
         $content = Get-Content $file -Raw
         $patched = $content -replace 'sm_[0-9]+', "sm_$ComputeCapability"
         if ($patched -ne $content) {
-            Set-Content -Path $file -Value $patched -Encoding UTF8 -NoNewline
+            Set-Content -Path $file -Value $patched -Encoding UTF8
         }
     }
 
@@ -238,7 +240,7 @@ function Prepare-PatchedDlibSource {
     $mainReplacement = "set(DLIB_USE_CUDA_COMPUTE_CAPABILITIES $ComputeCapability CACHE STRING `${DLIB_USE_CUDA_COMPUTE_CAPABILITIES_STR})"
     $mainCmakePatched = $mainCmakeContent -replace 'set\(DLIB_USE_CUDA_COMPUTE_CAPABILITIES 50 CACHE STRING \$\{DLIB_USE_CUDA_COMPUTE_CAPABILITIES_STR\}\)', $mainReplacement
     if ($mainCmakePatched -ne $mainCmakeContent) {
-        Set-Content -Path $mainCmakeFile -Value $mainCmakePatched -Encoding UTF8 -NoNewline
+        Set-Content -Path $mainCmakeFile -Value $mainCmakePatched -Encoding UTF8
     }
 
     $sourceBuildDir = Join-Path $sourceRoot 'build'
@@ -429,8 +431,8 @@ Write-Step 'Import verification...'
 $verifyScript = @'
 import os
 
-dll_dirs = [item for item in os.environ.get("DLIB_DLL_DIRS", "").split(";") if item]
-if hasattr(os, "add_dll_directory"):
+dll_dirs = [item for item in os.environ.get('DLIB_DLL_DIRS', '').split(';') if item]
+if hasattr(os, 'add_dll_directory'):
     for dll_dir in dll_dirs:
         if os.path.isdir(dll_dir):
             os.add_dll_directory(dll_dir)
@@ -438,8 +440,8 @@ if hasattr(os, "add_dll_directory"):
 import face_recognition
 import dlib
 
-print("face stack ok")
-print(f"dlib cuda: use_cuda={dlib.DLIB_USE_CUDA}, devices={dlib.cuda.get_num_devices()}")
+print('face stack ok')
+print('dlib cuda: use_cuda=%s, devices=%s' % (dlib.DLIB_USE_CUDA, dlib.cuda.get_num_devices()))
 '@
 & $venvPython -c $verifyScript
 if ($LASTEXITCODE -ne 0) {

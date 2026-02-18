@@ -140,6 +140,110 @@ function Resolve-PythonLauncher {
     throw "No working Python launcher found. Install Python and ensure 'python' or 'py -3' is available."
 }
 
+function Get-DlibCudaState {
+    param([string]$PythonExe)
+
+    $fallback = [pscustomobject]@{
+        has_dlib = $false
+        use_cuda = $false
+        cuda_devices = 0
+        cuda_enabled = $false
+        error = ''
+    }
+
+    if (-not (Test-Path $PythonExe)) {
+        return $fallback
+    }
+
+    $probeScript = @'
+import json
+import os
+
+payload = {
+    "has_dlib": False,
+    "use_cuda": False,
+    "cuda_devices": 0,
+    "cuda_enabled": False,
+    "error": ""
+}
+
+try:
+    dll_dirs = [item for item in os.environ.get("DLIB_DLL_DIRS", "").split(";") if item]
+    if hasattr(os, "add_dll_directory"):
+        for dll_dir in dll_dirs:
+            if os.path.isdir(dll_dir):
+                os.add_dll_directory(dll_dir)
+
+    import dlib
+    payload["has_dlib"] = True
+    payload["use_cuda"] = bool(getattr(dlib, "DLIB_USE_CUDA", False))
+    try:
+        payload["cuda_devices"] = int(dlib.cuda.get_num_devices())
+    except Exception:
+        payload["cuda_devices"] = 0
+    payload["cuda_enabled"] = payload["use_cuda"] and payload["cuda_devices"] > 0
+except Exception as exc:
+    payload["error"] = str(exc)
+
+print(json.dumps(payload))
+'@
+
+    try {
+        $raw = $probeScript | & $PythonExe -
+        if ($LASTEXITCODE -eq 0 -and $raw) {
+            return ($raw | ConvertFrom-Json)
+        }
+    } catch {
+        return $fallback
+    }
+
+    return $fallback
+}
+
+function Set-DlibProbeDllDirs {
+    param(
+        [string]$RepoRoot,
+        [string]$VenvPython
+    )
+
+    $dirs = @()
+    $runtimeCudnn = Join-Path $RepoRoot '.runtime\cudnn-cu13-extracted\cudnn-windows-x86_64-9.19.0.56_cuda13-archive'
+    $dirs += (Join-Path $runtimeCudnn 'bin\x64')
+    $dirs += (Join-Path $runtimeCudnn 'bin')
+
+    if ($env:CUDA_PATH) {
+        $dirs += (Join-Path $env:CUDA_PATH 'bin\x64')
+        $dirs += (Join-Path $env:CUDA_PATH 'bin')
+    }
+
+    $cudaRoot = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA'
+    if (Test-Path $cudaRoot) {
+        $latestCuda = Get-ChildItem -Path $cudaRoot -Directory -Filter 'v*' -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+        if ($latestCuda) {
+            $dirs += (Join-Path $latestCuda.FullName 'bin\x64')
+            $dirs += (Join-Path $latestCuda.FullName 'bin')
+        }
+    }
+
+    try {
+        $venvScriptsDir = Split-Path $VenvPython -Parent
+        $venvRoot = Split-Path $venvScriptsDir -Parent
+        $sitePackages = Join-Path $venvRoot 'Lib\site-packages'
+        $dirs += (Join-Path $sitePackages 'nvidia\cu13\bin\x86_64')
+        $dirs += (Join-Path $sitePackages 'nvidia\cudnn\bin')
+        $dirs += (Join-Path $sitePackages 'nvidia\cudnn\bin\x64')
+    } catch {
+        # keep defaults only
+    }
+
+    $validDirs = $dirs | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+    if ($validDirs.Count -gt 0) {
+        $env:DLIB_DLL_DIRS = $validDirs -join ';'
+    }
+}
+
 Run-Step -Name 'Checking required commands' -Action {
     $caddyCandidates = @(
         'C:\Program Files\Caddy\caddy.exe'
@@ -209,12 +313,45 @@ if (-not (Test-Path $venvPython)) {
 }
 
 Run-Step -Name 'Installing backend dependencies' -Action {
+    $requirementsPath = Join-Path $repoRoot 'backend\requirements.txt'
+    $requirementsToInstall = $requirementsPath
+    $usedCpuFallback = $false
+    $faceStackProbe = @'
+import os
+
+dll_dirs = [item for item in os.environ.get("DLIB_DLL_DIRS", "").split(";") if item]
+if hasattr(os, "add_dll_directory"):
+    for dll_dir in dll_dirs:
+        if os.path.isdir(dll_dir):
+            os.add_dll_directory(dll_dir)
+
+import face_recognition
+import dlib
+
+print("face stack ok")
+print(f"dlib cuda: use_cuda={bool(getattr(dlib, 'DLIB_USE_CUDA', False))}, devices={int(dlib.cuda.get_num_devices())}")
+'@
+
     & $venvPython -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) {
         throw 'pip upgrade failed.'
     }
 
-    & $venvPython -m pip install -r (Join-Path $repoRoot 'backend\requirements.txt')
+    # On Windows we install requirements without dlib-bin first to avoid overwriting CUDA-enabled dlib.
+    if ($isWindowsPlatform) {
+        Set-DlibProbeDllDirs -RepoRoot $repoRoot -VenvPython $venvPython
+        $pipFreeze = & $venvPython -m pip list --format=freeze
+        $hasDlibBin = $pipFreeze -match '^dlib-bin=='
+        if ($hasDlibBin) {
+            & $venvPython -m pip uninstall -y dlib-bin *> $null
+        }
+        $requirementsToInstall = Join-Path $runtimeDir 'requirements.no-dlib-bin.txt'
+        (Get-Content $requirementsPath) |
+            Where-Object { $_ -notmatch '^\s*dlib-bin\b' } |
+            Set-Content -Path $requirementsToInstall -Encoding UTF8
+    }
+
+    & $venvPython -m pip install -r $requirementsToInstall
     if ($LASTEXITCODE -ne 0) {
         throw 'pip install -r backend/requirements.txt failed.'
     }
@@ -227,9 +364,46 @@ Run-Step -Name 'Installing backend dependencies' -Action {
         }
     }
 
-    & $venvPython -c "import face_recognition, dlib; print('face stack ok')"
+    $faceStackOk = $true
+    $faceStackProbe | & $venvPython -
     if ($LASTEXITCODE -ne 0) {
+        $faceStackOk = $false
+    }
+
+    if (-not $faceStackOk -and $isWindowsPlatform) {
+        Write-Warning 'Face recognition runtime import failed with current dlib. Falling back to CPU dlib-bin.'
+        $usedCpuFallback = $true
+
+        & $venvPython -m pip install --force-reinstall dlib-bin==20.0.0
+        if ($LASTEXITCODE -ne 0) {
+            throw 'pip install dlib-bin==20.0.0 fallback failed.'
+        }
+
+        & $venvPython -m pip install --no-deps --force-reinstall face-recognition==1.3.0
+        if ($LASTEXITCODE -ne 0) {
+            throw 'pip reinstall face-recognition==1.3.0 --no-deps failed.'
+        }
+
+        $faceStackProbe | & $venvPython -
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Face recognition runtime import check failed after CPU fallback.'
+        }
+    } elseif (-not $faceStackOk) {
         throw 'Face recognition runtime import check failed.'
+    }
+
+    if ($isWindowsPlatform) {
+        Set-DlibProbeDllDirs -RepoRoot $repoRoot -VenvPython $venvPython
+        $dlibState = Get-DlibCudaState -PythonExe $venvPython
+        Write-Host "dlib runtime state: cuda_enabled=$($dlibState.cuda_enabled), use_cuda=$($dlibState.use_cuda), devices=$($dlibState.cuda_devices)"
+
+        $statePath = Join-Path $runtimeDir 'dlib-deploy-state.json'
+        [ordered]@{
+            timestamp = (Get-Date).ToString('o')
+            requirements_file = $requirementsToInstall
+            used_cpu_fallback = $usedCpuFallback
+            dlib = $dlibState
+        } | ConvertTo-Json -Depth 4 | Set-Content -Path $statePath -Encoding UTF8
     }
 }
 
