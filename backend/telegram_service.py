@@ -16,6 +16,9 @@ import logging
 from datetime import datetime
 import time
 import pickle
+import hashlib
+import tempfile
+import zipfile
 from pathlib import Path
 
 # Google Drive imports
@@ -29,6 +32,14 @@ try:
 except ImportError:
     GOOGLE_DRIVE_AVAILABLE = False
     logging.warning("Google Drive API не установлен. Используйте: pip install google-api-python-client google-auth-oauthlib")
+
+try:
+    from google.oauth2 import id_token as google_id_token
+    from google.auth.transport.requests import Request as GoogleAuthRequest
+    GOOGLE_TOKEN_VERIFY_AVAILABLE = True
+except ImportError:
+    GOOGLE_TOKEN_VERIFY_AVAILABLE = False
+    logging.warning("Google auth token verification is unavailable. Install google-auth.")
 
 # PDF imports
 from reportlab.lib import colors
@@ -138,6 +149,14 @@ def env_bool(name, default):
     return default
 
 
+def env_csv(name, default=None):
+    raw = os.environ.get(name, "")
+    items = [item.strip() for item in raw.split(",") if item.strip()]
+    if items:
+        return items
+    return list(default or [])
+
+
 def resolve_backend_path(path_value):
     path = Path(path_value)
     if not path.is_absolute():
@@ -152,13 +171,15 @@ API_PORT = env_int('API_PORT', 5000)
 PUBLIC_ORIGIN = os.environ.get('PUBLIC_ORIGIN', 'https://totalcode.indevs.in')
 MAX_CONTENT_LENGTH_MB = env_int('MAX_CONTENT_LENGTH_MB', 10)
 MAX_CONTENT_LENGTH_BYTES = MAX_CONTENT_LENGTH_MB * 1024 * 1024
-CORS_ORIGINS = [
+
+_DEFAULT_CORS_ORIGINS = [
     PUBLIC_ORIGIN,
     'http://localhost:5173',
     'http://127.0.0.1:5173',
     'http://localhost:4173',
     'http://127.0.0.1:4173',
 ]
+CORS_ORIGINS = list(dict.fromkeys(_DEFAULT_CORS_ORIGINS + env_csv('CORS_ORIGINS')))
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH_BYTES
@@ -190,7 +211,10 @@ def log_request_info():
     logger.info(f"Метод: {request.method}")
     logger.info(f"URL: {request.url}")
     logger.info(f"Path: {request.path}")
-    logger.info(f"Headers: {dict(request.headers)}")
+    headers = dict(request.headers)
+    if 'Authorization' in headers:
+        headers['Authorization'] = 'Bearer ***'
+    logger.info(f"Headers: {headers}")
     if request.method == 'POST':
         logger.info(f"Content-Type: {request.content_type}")
         logger.info(f"Content-Length: {request.content_length}")
@@ -325,6 +349,22 @@ GOOGLE_DRIVE_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_FOLDER_ID', '1DuNnC5uQbAIs
 GOOGLE_CREDENTIALS_FILE = resolve_backend_path(os.environ.get('GOOGLE_CREDENTIALS_FILE', 'oauth_credentials.json'))
 GOOGLE_TOKEN_FILE = resolve_backend_path(os.environ.get('GOOGLE_TOKEN_FILE', 'token.pickle'))
 GOOGLE_SCOPES = ['https://www.googleapis.com/auth/drive.file']
+GOOGLE_OAUTH_WEB_CLIENT_ID = os.environ.get('GOOGLE_OAUTH_WEB_CLIENT_ID', '').strip()
+
+# ========================================
+# BACKUP - Конфигурация
+# ========================================
+BACKUP_STORAGE_DIR = resolve_backend_path(os.environ.get('BACKUP_STORAGE_DIR', 'backup_storage'))
+BACKUP_MAX_FILE_MB = env_int('BACKUP_MAX_FILE_MB', 250)
+BACKUP_MAX_FILE_BYTES = max(1, BACKUP_MAX_FILE_MB) * 1024 * 1024
+BACKUP_MAX_UNCOMPRESSED_MB = env_int('BACKUP_MAX_UNCOMPRESSED_MB', 700)
+BACKUP_MAX_UNCOMPRESSED_BYTES = max(1, BACKUP_MAX_UNCOMPRESSED_MB) * 1024 * 1024
+BACKUP_SCHEMA_VERSION = max(1, env_int('BACKUP_SCHEMA_VERSION', 1))
+os.makedirs(BACKUP_STORAGE_DIR, exist_ok=True)
+
+# Ensure Flask request cap does not block backup upload before route validation.
+if int(app.config.get('MAX_CONTENT_LENGTH', 0) or 0) < BACKUP_MAX_FILE_BYTES:
+    app.config['MAX_CONTENT_LENGTH'] = BACKUP_MAX_FILE_BYTES
 
 # Кэшированный сервис Google Drive
 _google_drive_service = None
@@ -342,6 +382,183 @@ def add_event(icon, message, event_type='info'):
         'message': message,
         'type': event_type
     })
+
+
+def _schema_error(message, status=400):
+    return make_response_json({
+        'success': False,
+        'schemaVersion': BACKUP_SCHEMA_VERSION,
+        'error': message
+    }, status)
+
+
+def parse_bearer_token(auth_header):
+    if not auth_header:
+        return None
+    parts = auth_header.strip().split(' ', 1)
+    if len(parts) != 2 or parts[0].lower() != 'bearer':
+        return None
+    return parts[1].strip() or None
+
+
+def require_google_auth():
+    if not GOOGLE_TOKEN_VERIFY_AVAILABLE:
+        return None, _schema_error(
+            'Google token verification is unavailable on server',
+            status=500
+        )
+
+    if not GOOGLE_OAUTH_WEB_CLIENT_ID:
+        return None, _schema_error(
+            'GOOGLE_OAUTH_WEB_CLIENT_ID is not configured',
+            status=500
+        )
+
+    bearer_token = parse_bearer_token(request.headers.get('Authorization'))
+    if not bearer_token:
+        return None, _schema_error('Missing Bearer token', status=401)
+
+    try:
+        token_info = google_id_token.verify_oauth2_token(
+            bearer_token,
+            GoogleAuthRequest(),
+            GOOGLE_OAUTH_WEB_CLIENT_ID
+        )
+        issuer = str(token_info.get('iss', ''))
+        if issuer not in {'accounts.google.com', 'https://accounts.google.com'}:
+            raise ValueError('Invalid token issuer')
+
+        owner_sub = str(token_info.get('sub', '')).strip()
+        if not owner_sub:
+            raise ValueError('Token sub is missing')
+
+        return owner_sub, None
+    except Exception as exc:
+        logger.warning(f"Google token verification failed: {exc}")
+        return None, _schema_error('Invalid or expired Google token', status=401)
+
+
+def owner_storage_key(owner_sub):
+    return hashlib.sha256(owner_sub.encode('utf-8')).hexdigest()
+
+
+def get_backup_paths(owner_sub):
+    owner_dir = Path(BACKUP_STORAGE_DIR) / owner_storage_key(owner_sub)
+    owner_dir.mkdir(parents=True, exist_ok=True)
+    return owner_dir, owner_dir / 'latest.zip', owner_dir / 'latest.meta.json'
+
+
+def compute_file_sha256(file_path):
+    digest = hashlib.sha256()
+    with open(file_path, 'rb') as source:
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _normalize_zip_entry(name):
+    normalized = Path(name).as_posix().lstrip('/')
+    parts = Path(normalized).parts
+    if not normalized or '..' in parts:
+        raise ValueError(f'Unsafe zip entry: {name}')
+    if normalized.startswith('\\') or ':' in parts[0]:
+        raise ValueError(f'Unsafe zip entry: {name}')
+    return normalized
+
+
+def _read_json_entry(archive, name):
+    with archive.open(name, 'r') as entry_stream:
+        payload = entry_stream.read()
+    return json.loads(payload.decode('utf-8'))
+
+
+def validate_backup_archive(file_path):
+    try:
+        total_uncompressed = 0
+        asset_entries = []
+        all_entries = set()
+
+        with zipfile.ZipFile(file_path, 'r') as archive:
+            for info in archive.infolist():
+                normalized_name = _normalize_zip_entry(info.filename)
+                if info.is_dir():
+                    continue
+
+                all_entries.add(normalized_name)
+                total_uncompressed += int(info.file_size)
+                if total_uncompressed > BACKUP_MAX_UNCOMPRESSED_BYTES:
+                    return False, 'Backup archive is too large after extraction'
+
+                if normalized_name.startswith('assets/'):
+                    asset_entries.append(normalized_name)
+
+            required_entries = {'manifest.json', 'members.json', 'member_photos.json'}
+            missing = required_entries - all_entries
+            if missing:
+                return False, f'Missing required files: {", ".join(sorted(missing))}'
+
+            manifest = _read_json_entry(archive, 'manifest.json')
+            members = _read_json_entry(archive, 'members.json')
+            member_photos = _read_json_entry(archive, 'member_photos.json')
+
+        if not isinstance(manifest, dict):
+            return False, 'manifest.json must be a JSON object'
+        if not isinstance(members, list):
+            return False, 'members.json must be a JSON array'
+        if not isinstance(member_photos, list):
+            return False, 'member_photos.json must be a JSON array'
+
+        schema_version = manifest.get('schemaVersion')
+        try:
+            schema_version = int(schema_version)
+        except (TypeError, ValueError):
+            return False, 'manifest.schemaVersion must be an integer'
+        if schema_version < 1:
+            return False, 'manifest.schemaVersion must be >= 1'
+
+        counts = manifest.get('counts') if isinstance(manifest.get('counts'), dict) else {}
+        created_at_utc = manifest.get('createdAtUtc') or datetime.utcnow().isoformat() + 'Z'
+        metadata = {
+            'schemaVersion': schema_version,
+            'createdAtUtc': created_at_utc,
+            'compression': manifest.get('compression', 'jpeg_1280_q80'),
+            'membersCount': int(counts.get('members', len(members))),
+            'memberPhotosCount': int(counts.get('memberPhotos', len(member_photos))),
+            'assetsCount': int(counts.get('assets', len(asset_entries))),
+        }
+        return True, metadata
+    except zipfile.BadZipFile:
+        return False, 'File is not a valid ZIP archive'
+    except UnicodeDecodeError:
+        return False, 'Backup archive contains invalid UTF-8 JSON'
+    except json.JSONDecodeError as exc:
+        return False, f'Invalid JSON in backup archive: {exc.msg}'
+    except Exception as exc:
+        logger.exception("Backup archive validation failed")
+        return False, f'Backup archive validation failed: {exc}'
+
+
+def write_backup_meta(meta_path, metadata):
+    temp_meta = Path(str(meta_path) + '.tmp')
+    with open(temp_meta, 'w', encoding='utf-8') as meta_file:
+        json.dump(metadata, meta_file, ensure_ascii=False, indent=2)
+    os.replace(temp_meta, meta_path)
+
+
+def load_backup_meta(meta_path):
+    if not meta_path.exists():
+        return None
+    try:
+        with open(meta_path, 'r', encoding='utf-8') as meta_file:
+            data = json.load(meta_file)
+        if isinstance(data, dict):
+            return data
+    except Exception as exc:
+        logger.warning(f"Failed to read backup metadata {meta_path}: {exc}")
+    return None
 
 
 def get_google_drive_service():
@@ -1023,6 +1240,7 @@ def health_check():
         'service': 'combined_server',
         'face_recognition': True,
         'pdf_generation': True,
+        'backup': True,
         'members_count': len(face_encodings_db),
         'recent_events': events_list,
         'gpu': {
@@ -1033,6 +1251,167 @@ def health_check():
             'face_model': FACE_MODEL,
             'reason': '' if CUDA_ENABLED else CUDA_DISABLED_REASON
         }
+    })
+
+
+# ========================================
+# BACKUP - Роуты
+# ========================================
+
+@app.route('/api/backup/upload', methods=['POST'])
+@app.route('/backup/upload', methods=['POST'])
+def upload_backup_archive():
+    owner_sub, auth_error = require_google_auth()
+    if auth_error is not None:
+        return auth_error
+
+    backup_file = request.files.get('backup_file')
+    if backup_file is None:
+        return _schema_error('Missing form file: backup_file', status=400)
+
+    owner_dir, zip_path, meta_path = get_backup_paths(owner_sub)
+    temp_file = tempfile.NamedTemporaryFile(
+        prefix='backup_upload_',
+        suffix='.zip.tmp',
+        delete=False,
+        dir=owner_dir
+    )
+    temp_path = Path(temp_file.name)
+    temp_file.close()
+
+    try:
+        backup_file.save(temp_path)
+        size_bytes = temp_path.stat().st_size
+
+        if size_bytes <= 0:
+            return _schema_error('Uploaded file is empty', status=400)
+
+        if size_bytes > BACKUP_MAX_FILE_BYTES:
+            return _schema_error(
+                f'Backup exceeds max size of {BACKUP_MAX_FILE_MB} MB',
+                status=413
+            )
+
+        is_valid, validation_data = validate_backup_archive(temp_path)
+        if not is_valid:
+            return _schema_error(validation_data, status=400)
+
+        checksum = compute_file_sha256(temp_path)
+        metadata = {
+            'schemaVersion': int(validation_data['schemaVersion']),
+            'createdAtUtc': validation_data['createdAtUtc'],
+            'compression': validation_data['compression'],
+            'sizeBytes': int(size_bytes),
+            'membersCount': int(validation_data['membersCount']),
+            'memberPhotosCount': int(validation_data['memberPhotosCount']),
+            'assetsCount': int(validation_data['assetsCount']),
+            'checksumSha256': checksum,
+            'updatedAtUtc': datetime.utcnow().isoformat() + 'Z',
+        }
+
+        os.replace(temp_path, zip_path)
+        write_backup_meta(meta_path, metadata)
+
+        add_event('💾', f"Backup uploaded: {metadata['membersCount']} members", 'success')
+        return make_response_json({
+            'success': True,
+            'exists': True,
+            **metadata
+        })
+    except Exception as exc:
+        logger.exception("Backup upload failed")
+        return _schema_error(f'Backup upload failed: {exc}', status=500)
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception:
+                pass
+
+
+@app.route('/api/backup/meta', methods=['GET'])
+@app.route('/backup/meta', methods=['GET'])
+def backup_meta():
+    owner_sub, auth_error = require_google_auth()
+    if auth_error is not None:
+        return auth_error
+
+    _, zip_path, meta_path = get_backup_paths(owner_sub)
+    if not zip_path.exists():
+        return make_response_json({
+            'success': True,
+            'schemaVersion': BACKUP_SCHEMA_VERSION,
+            'exists': False
+        })
+
+    metadata = load_backup_meta(meta_path)
+    if metadata is None:
+        is_valid, validation_data = validate_backup_archive(zip_path)
+        if not is_valid:
+            return _schema_error('Stored backup archive is invalid', status=500)
+
+        metadata = {
+            'schemaVersion': int(validation_data['schemaVersion']),
+            'createdAtUtc': validation_data['createdAtUtc'],
+            'compression': validation_data['compression'],
+            'sizeBytes': int(zip_path.stat().st_size),
+            'membersCount': int(validation_data['membersCount']),
+            'memberPhotosCount': int(validation_data['memberPhotosCount']),
+            'assetsCount': int(validation_data['assetsCount']),
+            'checksumSha256': compute_file_sha256(zip_path),
+            'updatedAtUtc': datetime.utcnow().isoformat() + 'Z',
+        }
+        write_backup_meta(meta_path, metadata)
+
+    return make_response_json({
+        'success': True,
+        'exists': True,
+        **metadata
+    })
+
+
+@app.route('/api/backup/download', methods=['GET'])
+@app.route('/backup/download', methods=['GET'])
+def backup_download():
+    owner_sub, auth_error = require_google_auth()
+    if auth_error is not None:
+        return auth_error
+
+    _, zip_path, _ = get_backup_paths(owner_sub)
+    if not zip_path.exists():
+        return _schema_error('Backup not found', status=404)
+
+    return send_file(
+        str(zip_path),
+        mimetype='application/zip',
+        as_attachment=True,
+        download_name='familyone_backup_latest.zip',
+        max_age=0
+    )
+
+
+@app.route('/api/backup', methods=['DELETE'])
+@app.route('/backup', methods=['DELETE'])
+def delete_backup_archive():
+    owner_sub, auth_error = require_google_auth()
+    if auth_error is not None:
+        return auth_error
+
+    _, zip_path, meta_path = get_backup_paths(owner_sub)
+    deleted = False
+
+    for file_path in (zip_path, meta_path):
+        if file_path.exists():
+            try:
+                file_path.unlink()
+                deleted = True
+            except Exception as exc:
+                logger.warning(f"Failed deleting backup file {file_path}: {exc}")
+
+    return make_response_json({
+        'success': True,
+        'schemaVersion': BACKUP_SCHEMA_VERSION,
+        'deleted': deleted
     })
 
 
@@ -2334,7 +2713,12 @@ if __name__ == '__main__':
         f"(requested={USE_CUDA}, dlib_cuda={DLIB_USE_CUDA}, devices={CUDA_DEVICE_COUNT})"
     )
     logger.info(f"CORS origins: {', '.join(CORS_ORIGINS)}")
-    logger.info(f"MAX_CONTENT_LENGTH: {MAX_CONTENT_LENGTH_MB} MB")
+    effective_max_mb = int(app.config.get('MAX_CONTENT_LENGTH', 0)) // (1024 * 1024)
+    logger.info(f"MAX_CONTENT_LENGTH: {effective_max_mb} MB")
+    logger.info(
+        f"Backup: dir={BACKUP_STORAGE_DIR}, max_file={BACKUP_MAX_FILE_MB}MB, "
+        f"max_uncompressed={BACKUP_MAX_UNCOMPRESSED_MB}MB, schema={BACKUP_SCHEMA_VERSION}"
+    )
     logger.info("=" * 50)
 
     # Используем waitress для production (решает проблему с ngrok)
