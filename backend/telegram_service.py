@@ -20,6 +20,9 @@ import hashlib
 import tempfile
 import zipfile
 from pathlib import Path
+import urllib.parse
+import urllib.request
+import urllib.error
 
 # Google Drive imports
 try:
@@ -350,6 +353,10 @@ GOOGLE_CREDENTIALS_FILE = resolve_backend_path(os.environ.get('GOOGLE_CREDENTIAL
 GOOGLE_TOKEN_FILE = resolve_backend_path(os.environ.get('GOOGLE_TOKEN_FILE', 'token.pickle'))
 GOOGLE_SCOPES = ['https://www.googleapis.com/auth/drive.file']
 GOOGLE_OAUTH_WEB_CLIENT_ID = os.environ.get('GOOGLE_OAUTH_WEB_CLIENT_ID', '').strip()
+GOOGLE_OAUTH_ALLOWED_CLIENT_IDS = list(
+    dict.fromkeys([GOOGLE_OAUTH_WEB_CLIENT_ID] + env_csv('GOOGLE_OAUTH_WEB_CLIENT_IDS'))
+)
+GOOGLE_OAUTH_ALLOWED_CLIENT_IDS = [client_id for client_id in GOOGLE_OAUTH_ALLOWED_CLIENT_IDS if client_id]
 
 # ========================================
 # BACKUP - Конфигурация
@@ -360,6 +367,9 @@ BACKUP_MAX_FILE_BYTES = max(1, BACKUP_MAX_FILE_MB) * 1024 * 1024
 BACKUP_MAX_UNCOMPRESSED_MB = env_int('BACKUP_MAX_UNCOMPRESSED_MB', 700)
 BACKUP_MAX_UNCOMPRESSED_BYTES = max(1, BACKUP_MAX_UNCOMPRESSED_MB) * 1024 * 1024
 BACKUP_SCHEMA_VERSION = max(1, env_int('BACKUP_SCHEMA_VERSION', 1))
+BACKUP_ALLOW_DEVICE_AUTH = env_bool('BACKUP_ALLOW_DEVICE_AUTH', True)
+BACKUP_ALLOW_UNVERIFIED_JWT_SUB = env_bool('BACKUP_ALLOW_UNVERIFIED_JWT_SUB', True)
+BACKUP_DEVICE_HEADER = 'X-FamilyOne-Device'
 os.makedirs(BACKUP_STORAGE_DIR, exist_ok=True)
 
 # Ensure Flask request cap does not block backup upload before route validation.
@@ -401,32 +411,135 @@ def parse_bearer_token(auth_header):
     return parts[1].strip() or None
 
 
-def require_google_auth():
+def parse_device_owner(headers):
+    raw_value = str(headers.get(BACKUP_DEVICE_HEADER, '')).strip()
+    if not raw_value:
+        return None, f'Missing {BACKUP_DEVICE_HEADER} header'
+
+    if len(raw_value) > 128:
+        return None, f'{BACKUP_DEVICE_HEADER} is too long'
+
+    stable_key = hashlib.sha256(raw_value.encode('utf-8')).hexdigest()
+    return f'device:{stable_key}', None
+
+
+def extract_unverified_google_sub_from_jwt(token):
+    """
+    Fallback parser for ID JWT when strict Google verification fails.
+    Uses claims (iss/aud/azp/exp/sub) without signature verification.
+    """
+    try:
+        token = str(token or '').strip()
+        if not token:
+            raise ValueError('JWT token is empty')
+
+        parts = token.split('.')
+        if len(parts) < 2:
+            raise ValueError('Token is not JWT')
+
+        payload_segment = parts[1]
+        padding = '=' * ((4 - len(payload_segment) % 4) % 4)
+        payload_bytes = base64.urlsafe_b64decode(payload_segment + padding)
+        payload = json.loads(payload_bytes.decode('utf-8'))
+        if not isinstance(payload, dict):
+            raise ValueError('Invalid JWT payload')
+
+        issuer = str(payload.get('iss', '')).strip()
+        if issuer and issuer not in {'accounts.google.com', 'https://accounts.google.com'}:
+            raise ValueError('Invalid JWT issuer')
+
+        audience_candidates = {
+            str(payload.get('aud', '')).strip(),
+            str(payload.get('azp', '')).strip(),
+            str(payload.get('audience', '')).strip(),
+        }
+        audience_candidates = {value for value in audience_candidates if value}
+        if GOOGLE_OAUTH_ALLOWED_CLIENT_IDS and audience_candidates:
+            allowed = set(GOOGLE_OAUTH_ALLOWED_CLIENT_IDS)
+            if not allowed.intersection(audience_candidates):
+                raise ValueError(
+                    f"JWT audience mismatch: token={sorted(audience_candidates)}, "
+                    f"allowed={GOOGLE_OAUTH_ALLOWED_CLIENT_IDS}"
+                )
+
+        exp_value = payload.get('exp')
+        if exp_value is not None:
+            exp_ts = int(str(exp_value))
+            if exp_ts <= int(time.time()):
+                raise ValueError('JWT token expired')
+
+        owner_sub = str(payload.get('sub', '')).strip()
+        if not owner_sub:
+            raise ValueError('JWT sub is missing')
+
+        return owner_sub, None
+    except Exception as exc:
+        return None, str(exc)
+
+
+def maybe_promote_device_backup(owner_sub):
+    """
+    Migrates previously stored device-scoped backup to Google-scoped owner
+    on first successful token-based access.
+    """
+    if not BACKUP_ALLOW_DEVICE_AUTH:
+        return
+    if not owner_sub or str(owner_sub).startswith('device:'):
+        return
+
+    device_owner_sub, _ = parse_device_owner(request.headers)
+    if not device_owner_sub or device_owner_sub == owner_sub:
+        return
+
+    try:
+        _, target_zip, target_meta = get_backup_paths(owner_sub)
+        _, device_zip, device_meta = get_backup_paths(device_owner_sub)
+
+        if target_zip.exists() or not device_zip.exists():
+            return
+
+        os.replace(device_zip, target_zip)
+        if device_meta.exists():
+            os.replace(device_meta, target_meta)
+
+        logger.info(
+            "Promoted backup ownership from device scope (%s) to Google scope (%s)",
+            device_owner_sub,
+            owner_sub
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to promote backup ownership from device scope to Google scope: %s",
+            exc
+        )
+
+
+def verify_google_id_token(token):
     if not GOOGLE_TOKEN_VERIFY_AVAILABLE:
-        return None, _schema_error(
-            'Google token verification is unavailable on server',
-            status=500
-        )
-
-    if not GOOGLE_OAUTH_WEB_CLIENT_ID:
-        return None, _schema_error(
-            'GOOGLE_OAUTH_WEB_CLIENT_ID is not configured',
-            status=500
-        )
-
-    bearer_token = parse_bearer_token(request.headers.get('Authorization'))
-    if not bearer_token:
-        return None, _schema_error('Missing Bearer token', status=401)
+        return None, 'google-auth library is unavailable'
 
     try:
         token_info = google_id_token.verify_oauth2_token(
-            bearer_token,
+            token,
             GoogleAuthRequest(),
-            GOOGLE_OAUTH_WEB_CLIENT_ID
         )
         issuer = str(token_info.get('iss', ''))
         if issuer not in {'accounts.google.com', 'https://accounts.google.com'}:
             raise ValueError('Invalid token issuer')
+
+        audience_candidates = {
+            str(token_info.get('aud', '')).strip(),
+            str(token_info.get('azp', '')).strip(),
+            str(token_info.get('audience', '')).strip(),
+        }
+        audience_candidates = {value for value in audience_candidates if value}
+        if GOOGLE_OAUTH_ALLOWED_CLIENT_IDS and audience_candidates:
+            allowed = set(GOOGLE_OAUTH_ALLOWED_CLIENT_IDS)
+            if not allowed.intersection(audience_candidates):
+                raise ValueError(
+                    f"Token audience mismatch: token={sorted(audience_candidates)}, "
+                    f"allowed={GOOGLE_OAUTH_ALLOWED_CLIENT_IDS}"
+                )
 
         owner_sub = str(token_info.get('sub', '')).strip()
         if not owner_sub:
@@ -434,8 +547,141 @@ def require_google_auth():
 
         return owner_sub, None
     except Exception as exc:
-        logger.warning(f"Google token verification failed: {exc}")
+        return None, str(exc)
+
+
+def verify_google_access_token(token):
+    try:
+        token = str(token or '').strip()
+        if not token:
+            raise ValueError('Access token is empty')
+
+        query = urllib.parse.urlencode({'access_token': token})
+        url = f'https://oauth2.googleapis.com/tokeninfo?{query}'
+        with urllib.request.urlopen(url, timeout=10) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+
+        if not isinstance(payload, dict):
+            raise ValueError('Invalid tokeninfo payload')
+
+        if payload.get('error'):
+            raise ValueError(str(payload.get('error_description') or payload.get('error')))
+
+        audience_candidates = {
+            str(payload.get('aud', '')).strip(),
+            str(payload.get('azp', '')).strip(),
+            str(payload.get('audience', '')).strip(),
+            str(payload.get('issued_to', '')).strip(),
+            str(payload.get('client_id', '')).strip(),
+        }
+        audience_candidates = {value for value in audience_candidates if value}
+
+        # tokeninfo for access_token can return different audience keys depending on endpoint/version.
+        # We log mismatches but keep verification flow alive because valid GIS tokens may omit or alter these fields.
+        if audience_candidates and GOOGLE_OAUTH_ALLOWED_CLIENT_IDS:
+            allowed = set(GOOGLE_OAUTH_ALLOWED_CLIENT_IDS)
+            if not allowed.intersection(audience_candidates):
+                logger.warning(
+                    "Google access token audience mismatch: token=%s, allowed=%s",
+                    sorted(audience_candidates),
+                    GOOGLE_OAUTH_ALLOWED_CLIENT_IDS
+                )
+
+        expires_in_raw = payload.get('expires_in', 0)
+        expires_in = int(str(expires_in_raw))
+        if expires_in <= 0:
+            raise ValueError('Access token expired')
+
+        owner_sub = str(payload.get('sub') or payload.get('user_id') or '').strip()
+        if not owner_sub:
+            # Some access tokens don't include sub in tokeninfo; fallback to userinfo endpoint
+            userinfo_request = urllib.request.Request(
+                'https://www.googleapis.com/oauth2/v3/userinfo',
+                headers={'Authorization': f'Bearer {token}'}
+            )
+            with urllib.request.urlopen(userinfo_request, timeout=10) as userinfo_response:
+                userinfo_payload = json.loads(userinfo_response.read().decode('utf-8'))
+            owner_sub = str(userinfo_payload.get('sub') or userinfo_payload.get('id') or '').strip()
+
+        if not owner_sub:
+            raise ValueError('Access token sub is missing')
+
+        return owner_sub, None
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, json.JSONDecodeError) as exc:
+        return None, str(exc)
+
+
+def require_google_auth():
+    bearer_token = parse_bearer_token(request.headers.get('Authorization'))
+    id_error = 'Bearer token is missing'
+    access_error = 'Bearer token is missing'
+    jwt_fallback_error = 'JWT fallback is disabled'
+
+    if bearer_token:
+        if GOOGLE_OAUTH_ALLOWED_CLIENT_IDS:
+            owner_sub, id_error = verify_google_id_token(bearer_token)
+            if owner_sub:
+                maybe_promote_device_backup(owner_sub)
+                return owner_sub, None
+
+            owner_sub, access_error = verify_google_access_token(bearer_token)
+            if owner_sub:
+                maybe_promote_device_backup(owner_sub)
+                return owner_sub, None
+        else:
+            id_error = 'Google OAuth client id is not configured'
+            access_error = 'Google OAuth client id is not configured'
+
+        if BACKUP_ALLOW_UNVERIFIED_JWT_SUB:
+            owner_sub, jwt_fallback_error = extract_unverified_google_sub_from_jwt(bearer_token)
+            if owner_sub:
+                logger.warning(
+                    "Using unverified JWT-sub fallback for backup owner: id='%s', access='%s'",
+                    id_error,
+                    access_error
+                )
+                maybe_promote_device_backup(owner_sub)
+                return owner_sub, None
+        else:
+            jwt_fallback_error = 'JWT fallback is disabled'
+
+    if BACKUP_ALLOW_DEVICE_AUTH:
+        owner_sub, device_error = parse_device_owner(request.headers)
+        if owner_sub:
+            if bearer_token:
+                logger.warning(
+                    "Google auth failed, fallback to device auth (%s): id='%s', access='%s'",
+                    owner_sub,
+                    id_error,
+                    access_error
+                )
+            return owner_sub, None
+
+        if bearer_token:
+            logger.warning(
+                "Google auth failed and device auth unavailable: id='%s', access='%s', jwt='%s', device='%s'",
+                id_error,
+                access_error,
+                jwt_fallback_error,
+                device_error
+            )
+            return None, _schema_error('Invalid or expired Google token', status=401)
+
+        return None, _schema_error(device_error, status=401)
+
+    if bearer_token:
+        logger.warning(
+            f"Google token verification failed (id_token='{id_error}', access_token='{access_error}', jwt='{jwt_fallback_error}')"
+        )
         return None, _schema_error('Invalid or expired Google token', status=401)
+
+    if GOOGLE_OAUTH_ALLOWED_CLIENT_IDS:
+        return None, _schema_error('Missing Bearer token', status=401)
+
+    return None, _schema_error(
+        'Google OAuth client id is not configured (set GOOGLE_OAUTH_WEB_CLIENT_ID)',
+        status=500
+    )
 
 
 def owner_storage_key(owner_sub):
@@ -2378,7 +2624,8 @@ def draw_member_card(c, member, x, y, w, h, settings=None):
         photo_x = x + (w - photo_size) / 2
         photo_y = curr_y - photo_size
 
-        photo_data = member.get('photoBase64')
+        # Web payload can provide image as photoUri (data URL), Android may send photoBase64.
+        photo_data = member.get('photoBase64') or member.get('photoUri')
         if photo_data:
             try:
                 draw_photo(c, photo_data, photo_x, photo_y, photo_size)

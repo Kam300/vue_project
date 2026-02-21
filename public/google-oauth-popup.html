@@ -1,0 +1,34 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Google OAuth</title>
+  </head>
+  <body>
+    <p>Обработка авторизации Google...</p>
+    <script>
+      (function () {
+        var TYPE = 'familyone_google_oauth_popup'
+        var hashParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''))
+        var queryParams = new URLSearchParams(window.location.search || '')
+
+        var payload = {
+          type: TYPE,
+          id_token: hashParams.get('id_token') || queryParams.get('id_token') || '',
+          access_token: hashParams.get('access_token') || queryParams.get('access_token') || '',
+          state: hashParams.get('state') || queryParams.get('state') || '',
+          error: hashParams.get('error') || queryParams.get('error') || '',
+          error_description:
+            hashParams.get('error_description') || queryParams.get('error_description') || ''
+        }
+
+        if (window.opener && window.location.origin) {
+          window.opener.postMessage(payload, window.location.origin)
+        }
+
+        window.close()
+      })()
+    </script>
+  </body>
+</html>

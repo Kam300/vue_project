@@ -12,6 +12,10 @@
     4. Subsequent runs do NOT require admin rights
 #>
 
+param(
+    [switch]$NoTunnel
+)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -31,6 +35,8 @@ $backendEnvFile     = Join-Path $backendDir '.env'
 $backendEnvExample  = Join-Path $backendDir '.env.example'
 $venvDir            = Join-Path $backendDir '.venv'
 $venvPython         = Join-Path $venvDir 'Scripts\python.exe'
+$frpcExePath        = 'C:\frp\frpc.exe'
+$frpcConfigPath     = 'C:\frp\frpc.toml'
 
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 
@@ -167,6 +173,89 @@ function Wait-ForHttp {
     return $false
 }
 
+function Get-EnvValue {
+    param(
+        [string]$FilePath,
+        [string]$Name,
+        [string]$DefaultValue = ''
+    )
+
+    if (-not (Test-Path $FilePath)) {
+        return $DefaultValue
+    }
+
+    $raw = Get-Content $FilePath -ErrorAction SilentlyContinue
+    foreach ($line in $raw) {
+        if (-not $line) { continue }
+        $trimmed = $line.Trim()
+        if ($trimmed.StartsWith('#')) { continue }
+        if ($trimmed -notmatch '=') { continue }
+
+        $pair = $trimmed.Split('=', 2)
+        $key = $pair[0].Trim()
+        if ($key -ne $Name) { continue }
+
+        $value = $pair[1].Trim().Trim('"').Trim("'")
+        if ($value) { return $value }
+    }
+
+    return $DefaultValue
+}
+
+function Normalize-Origin {
+    param([string]$Value, [string]$DefaultValue)
+    $candidate = ''
+    if ($null -ne $Value) {
+        $candidate = [string]$Value
+    }
+    $candidate = $candidate.Trim()
+    if (-not $candidate) { $candidate = $DefaultValue }
+    return $candidate.TrimEnd('/')
+}
+
+function Get-OriginHost {
+    param([string]$Origin, [string]$FallbackHost)
+    try {
+        $uri = [uri]$Origin
+        if ($uri.Host) { return $uri.Host }
+    } catch {}
+    return $FallbackHost
+}
+
+function Convert-EnvBoolean {
+    param([string]$Value)
+    if (-not $Value) { return $null }
+
+    $normalized = $Value.Trim().ToLowerInvariant()
+    switch ($normalized) {
+        '1' { return $true }
+        'true' { return $true }
+        'yes' { return $true }
+        'y' { return $true }
+        'on' { return $true }
+        '0' { return $false }
+        'false' { return $false }
+        'no' { return $false }
+        'n' { return $false }
+        'off' { return $false }
+        default { return $null }
+    }
+}
+
+function Test-PythonModule {
+    param(
+        [string]$PythonExe,
+        [string]$ModuleName
+    )
+
+    try {
+        & $PythonExe -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$ModuleName') else 1)" *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
 function Start-BackgroundProcess {
     param(
         [string]$Name,
@@ -212,6 +301,19 @@ function Start-BackgroundProcess {
     return $process
 }
 
+$defaultPublicOrigin = 'https://totalcode.indevs.in'
+$publicOrigin = Normalize-Origin (Get-EnvValue -FilePath $backendEnvFile -Name 'PUBLIC_ORIGIN' -DefaultValue $defaultPublicOrigin) $defaultPublicOrigin
+$publicHost = Get-OriginHost -Origin $publicOrigin -FallbackHost 'totalcode.indevs.in'
+$useCloudflaredRaw = Get-EnvValue -FilePath $backendEnvFile -Name 'USE_CLOUDFLARED' -DefaultValue ''
+$useCloudflared = Convert-EnvBoolean -Value $useCloudflaredRaw
+if ($NoTunnel) {
+    $useCloudflared = $false
+}
+$requestedTunnel = ($useCloudflared -eq $true)
+$requestedNoTunnel = ($useCloudflared -eq $false)
+$externalRootUrl = "$publicOrigin/"
+$externalApiHealthUrl = "$publicOrigin/api/health"
+
 # ========================================
 # STEP 1: STOP PREVIOUS PROCESSES
 # ========================================
@@ -242,8 +344,24 @@ if (Test-Path $pidsFile) {
 $pythonProcs = Get-Process python -ErrorAction SilentlyContinue
 if ($pythonProcs) {
     $pythonProcs | Stop-Process -Force -ErrorAction SilentlyContinue
-    Write-Ok "Stopped $($pythonProcs.Count) stale Python process(es)"
+    Write-Ok "Stopped $(@($pythonProcs).Count) stale Python process(es)"
     Start-Sleep -Seconds 2
+}
+
+# Stop orphaned Caddy processes that can keep admin port 2019 busy.
+$caddyProcs = Get-Process caddy -ErrorAction SilentlyContinue
+if ($caddyProcs) {
+    $caddyProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Ok "Stopped $(@($caddyProcs).Count) stale Caddy process(es)"
+    Start-Sleep -Seconds 1
+}
+
+# Stop stale frpc instances to avoid duplicate proxy registration errors.
+$frpcProcs = Get-Process frpc -ErrorAction SilentlyContinue
+if ($frpcProcs) {
+    $frpcProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Ok "Stopped $(@($frpcProcs).Count) stale frpc process(es)"
+    Start-Sleep -Seconds 1
 }
 
 # ========================================
@@ -311,14 +429,18 @@ if (-not $caddyFound) {
 Write-Ok 'Caddy found'
 
 # -- cloudflared --
-if (-not (Test-CommandExists 'cloudflared')) {
-    Write-Warn 'cloudflared not found, installing...'
-    Install-ViaWinget 'Cloudflare.cloudflared' 'Cloudflare Tunnel'
+if ($requestedNoTunnel) {
+    Write-Ok 'cloudflared skipped (disabled by -NoTunnel or USE_CLOUDFLARED=false)'
+} else {
     if (-not (Test-CommandExists 'cloudflared')) {
-        throw 'cloudflared not found after install. Restart terminal and re-run.'
+        Write-Warn 'cloudflared not found, installing...'
+        Install-ViaWinget 'Cloudflare.cloudflared' 'Cloudflare Tunnel'
+        if (-not (Test-CommandExists 'cloudflared')) {
+            throw 'cloudflared not found after install. Restart terminal and re-run.'
+        }
     }
+    Write-Ok 'cloudflared found'
 }
-Write-Ok 'cloudflared found'
 
 # ========================================
 # STEP 3: CLOUDFLARE TUNNEL CONFIG
@@ -326,25 +448,28 @@ Write-Ok 'cloudflared found'
 
 Write-Section 'Step 3/7 - Cloudflare Tunnel config'
 
-if (-not (Test-Path $cloudflaredConfig)) {
-    Write-Warn 'Cloudflare Tunnel config not found.'
-    Write-Host ''
-    Write-Host '  To set up the tunnel, run these commands in a SEPARATE terminal:' -ForegroundColor Cyan
-    Write-Host ''
-    Write-Host '    cloudflared tunnel login' -ForegroundColor White
-    Write-Host '    cloudflared tunnel create family-tree-server' -ForegroundColor White
-    Write-Host '    cloudflared tunnel route dns family-tree-server totalcode.indevs.in' -ForegroundColor White
-    Write-Host ''
-    Write-Host "  Then copy: $cloudflaredExample" -ForegroundColor Gray
-    Write-Host "  to:        $cloudflaredConfig" -ForegroundColor Gray
-    Write-Host '  and fill in tunnel ID + credentials path.' -ForegroundColor Gray
-    Write-Host ''
-
-    $skipTunnel = Read-Host '  Start server WITHOUT Cloudflare Tunnel? (y/n)'
-    if ($skipTunnel -ne 'y' -and $skipTunnel -ne 'Y') {
-        throw 'Set up Cloudflare Tunnel config and re-run.'
-    }
+if ($requestedNoTunnel) {
     $noTunnel = $true
+    Write-Ok 'Cloudflare Tunnel disabled explicitly'
+} elseif (-not (Test-Path $cloudflaredConfig)) {
+    if ($requestedTunnel) {
+        Write-Fail "Cloudflare Tunnel requested but config missing: $cloudflaredConfig"
+        Write-Host ''
+        Write-Host '  To set up the tunnel, run these commands in a SEPARATE terminal:' -ForegroundColor Cyan
+        Write-Host ''
+        Write-Host '    cloudflared tunnel login' -ForegroundColor White
+        Write-Host '    cloudflared tunnel create family-tree-server' -ForegroundColor White
+        Write-Host "    cloudflared tunnel route dns family-tree-server $publicHost" -ForegroundColor White
+        Write-Host ''
+        Write-Host "  Then copy: $cloudflaredExample" -ForegroundColor Gray
+        Write-Host "  to:        $cloudflaredConfig" -ForegroundColor Gray
+        Write-Host '  and fill in tunnel ID + credentials path.' -ForegroundColor Gray
+        Write-Host ''
+        throw 'Cloudflare Tunnel is enabled but config file is missing.'
+    }
+
+    $noTunnel = $true
+    Write-Warn "Cloudflare config not found, starting without tunnel: $cloudflaredConfig"
 } else {
     $noTunnel = $false
     Write-Ok "Config found: $cloudflaredConfig"
@@ -386,11 +511,18 @@ $isWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([
 # Install dlib first
 if ($isWindows) {
     Write-Step 'Installing dlib-bin...'
-    & $venvPython -m pip install dlib-bin --quiet 2>$null
+    try {
+        & $venvPython -m pip install dlib-bin --quiet 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "dlib-bin install returned code $LASTEXITCODE. Continuing anyway."
+        }
+    } catch {
+        Write-Warn "dlib-bin install warning: $($_.Exception.Message)"
+    }
 }
 
 # Check if face_recognition_models is installed
-$modelsInstalled = & $venvPython -m pip show face-recognition-models 2>$null
+$modelsInstalled = Test-PythonModule -PythonExe $venvPython -ModuleName 'face_recognition_models'
 if (-not $modelsInstalled) {
     Write-Step 'face_recognition_models NOT installed. Installing from git...'
     & $venvPython -m pip install --force-reinstall "git+https://github.com/ageitgey/face_recognition_models" 2>&1
@@ -399,7 +531,7 @@ if (-not $modelsInstalled) {
         & $venvPython -m pip install "git+https://github.com/ageitgey/face_recognition_models" 2>&1
     }
     # Verify it installed
-    $modelsInstalled = & $venvPython -m pip show face-recognition-models 2>$null
+    $modelsInstalled = Test-PythonModule -PythonExe $venvPython -ModuleName 'face_recognition_models'
     if (-not $modelsInstalled) {
         Write-Fail 'face_recognition_models still not installed!'
         Write-Host '  Run this manually:' -ForegroundColor Gray
@@ -414,6 +546,9 @@ if (-not $modelsInstalled) {
 # Install face_recognition itself
 Write-Step 'Installing face_recognition...'
 & $venvPython -m pip install --no-deps face-recognition==1.3.0 --quiet
+if ($LASTEXITCODE -ne 0) {
+    Write-Warn "face_recognition install returned code $LASTEXITCODE."
+}
 
 # Deep check: actually trigger models loading
 Write-Step 'Checking full import chain...'
@@ -421,9 +556,12 @@ Write-Step 'Checking full import chain...'
 if ($LASTEXITCODE -ne 0) {
     Write-Fail 'face_recognition deep check failed!'
     Write-Host '  Diagnostics:' -ForegroundColor Gray
-    & $venvPython -m pip show face-recognition-models 2>&1 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-    & $venvPython -m pip show face-recognition 2>&1 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
-    & $venvPython -m pip show dlib-bin 2>&1 | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    $hasModels = Test-PythonModule -PythonExe $venvPython -ModuleName 'face_recognition_models'
+    $hasFace = Test-PythonModule -PythonExe $venvPython -ModuleName 'face_recognition'
+    $hasDlib = Test-PythonModule -PythonExe $venvPython -ModuleName 'dlib'
+    Write-Host "    face_recognition_models: $hasModels" -ForegroundColor Gray
+    Write-Host "    face_recognition:        $hasFace" -ForegroundColor Gray
+    Write-Host "    dlib:                    $hasDlib" -ForegroundColor Gray
     Write-Host ''
     Write-Host '  Server will try to start but may fail.' -ForegroundColor DarkYellow
 } else {
@@ -457,6 +595,8 @@ $apiOut   = Join-Path $runtimeDir 'api.out.log'
 $apiErr   = Join-Path $runtimeDir 'api.err.log'
 $caddyOut = Join-Path $runtimeDir 'caddy.out.log'
 $caddyErr = Join-Path $runtimeDir 'caddy.err.log'
+$frpcOut  = Join-Path $runtimeDir 'frpc.out.log'
+$frpcErr  = Join-Path $runtimeDir 'frpc.err.log'
 $cloudOut = Join-Path $runtimeDir 'cloudflared.out.log'
 $cloudErr = Join-Path $runtimeDir 'cloudflared.err.log'
 
@@ -471,11 +611,54 @@ $apiProcess = Start-BackgroundProcess -Name 'Flask API' `
 
 # Caddy
 $caddyConfigPath = Join-Path $repoRoot 'infra\Caddyfile'
-$caddyProcess = Start-BackgroundProcess -Name 'Caddy' `
-    -FilePath 'caddy' `
-    -Arguments @('run', '--config', $caddyConfigPath, '--adapter', 'caddyfile') `
-    -WorkDir $repoRoot `
-    -LogOut $caddyOut -LogErr $caddyErr
+$hadCaddyAdminEnv = Test-Path Env:\CADDY_ADMIN
+$prevCaddyAdminEnv = $null
+if ($hadCaddyAdminEnv) {
+    $prevCaddyAdminEnv = $env:CADDY_ADMIN
+}
+# Some Caddy builds on Windows don't accept "off" from env var and fail with
+# "lookup off: no such host". Use an ephemeral localhost admin listener instead.
+$env:CADDY_ADMIN = '127.0.0.1:0'
+try {
+    $caddyProcess = Start-BackgroundProcess -Name 'Caddy' `
+        -FilePath 'caddy' `
+        -Arguments @('run', '--config', $caddyConfigPath, '--adapter', 'caddyfile') `
+        -WorkDir $repoRoot `
+        -LogOut $caddyOut -LogErr $caddyErr
+} finally {
+    if ($hadCaddyAdminEnv) {
+        $env:CADDY_ADMIN = $prevCaddyAdminEnv
+    } else {
+        Remove-Item Env:\CADDY_ADMIN -ErrorAction SilentlyContinue
+    }
+}
+
+# FRP client for no-tunnel mode (public domain via VPS frps)
+$frpcProcess = $null
+if ($noTunnel) {
+    if ((Test-Path $frpcExePath) -and (Test-Path $frpcConfigPath)) {
+        $existingFrpc = Get-Process frpc -ErrorAction SilentlyContinue
+        if ($existingFrpc) {
+            $existingCount = @($existingFrpc).Count
+            $selected = @($existingFrpc)[0]
+            if ($existingCount -gt 1) {
+                Write-Warn "Detected $existingCount running frpc processes; using existing PID $($selected.Id)"
+            } else {
+                Write-Ok "frpc already running (PID: $($selected.Id)), skipping extra start"
+            }
+            $frpcProcess = $selected
+        } else {
+            $frpcProcess = Start-BackgroundProcess -Name 'frpc' `
+                -FilePath $frpcExePath `
+                -Arguments @('-c', $frpcConfigPath) `
+                -WorkDir (Split-Path $frpcExePath -Parent) `
+                -LogOut $frpcOut -LogErr $frpcErr
+        }
+    } else {
+        Write-Warn "frpc is not configured. Expected files: $frpcExePath and $frpcConfigPath"
+        Write-Warn "Run scripts/setup-frpc.ps1 to enable public domain via FRP."
+    }
+}
 
 # Cloudflared (if configured)
 $cloudflaredProcess = $null
@@ -492,6 +675,9 @@ $processes = @(
     [ordered]@{ name = 'api'; pid = $apiProcess.Id; stdout = $apiOut; stderr = $apiErr }
     [ordered]@{ name = 'caddy'; pid = $caddyProcess.Id; stdout = $caddyOut; stderr = $caddyErr }
 )
+if ($frpcProcess) {
+    $processes += [ordered]@{ name = 'frpc'; pid = $frpcProcess.Id; stdout = $frpcOut; stderr = $frpcErr }
+}
 if ($cloudflaredProcess) {
     $processes += [ordered]@{ name = 'cloudflared'; pid = $cloudflaredProcess.Id; stdout = $cloudOut; stderr = $cloudErr }
 }
@@ -529,18 +715,41 @@ if (-not (Wait-ForHttp 'http://127.0.0.1:8080/api/health' 20 1)) {
 }
 Write-Ok 'API routing - OK'
 
-if (-not $noTunnel) {
-    Write-Step 'Checking Cloudflare Tunnel...'
-    $externalUrls = @(
-        'https://totalcode.indevs.in/',
-        'https://totalcode.indevs.in/api/health'
-    )
-    foreach ($url in $externalUrls) {
-        if (Wait-ForHttp $url 5 2) {
-            Write-Ok $url
-        } else {
-            Write-Warn "$url - may need more time"
+if ($frpcProcess) {
+    Write-Step 'Checking frpc connection...'
+    $frpcConnected = $false
+    for ($i = 1; $i -le 12; $i++) {
+        $conn = Get-NetTCPConnection -OwningProcess $frpcProcess.Id -State Established -ErrorAction SilentlyContinue |
+            Where-Object { $_.RemotePort -eq 7000 } |
+            Select-Object -First 1
+        if ($conn) {
+            $frpcConnected = $true
+            break
         }
+        Start-Sleep -Milliseconds 500
+    }
+
+    if ($frpcConnected) {
+        Write-Ok 'frpc connected to FRP server'
+    } else {
+        Write-Warn 'frpc started but did not establish connection to FRP server yet'
+        Write-Warn "Check log: $frpcErr"
+    }
+}
+
+Write-Step 'Health checks (external)'
+if ($noTunnel) {
+    Write-Warn 'Running without Cloudflare Tunnel; external checks depend on DNS + router/NAT forwarding'
+}
+$externalUrls = @(
+    $externalRootUrl,
+    $externalApiHealthUrl
+)
+foreach ($url in $externalUrls) {
+    if (Wait-ForHttp $url 5 2) {
+        Write-Ok $url
+    } else {
+        Write-Warn "$url - may need more time"
     }
 }
 
@@ -555,9 +764,12 @@ Write-Host '========================================================' -Foregroun
 Write-Host ''
 Write-Host "  Local site:    http://127.0.0.1:8080" -ForegroundColor White
 Write-Host "  Local API:     http://127.0.0.1:5000/health" -ForegroundColor White
-if (-not $noTunnel) {
-    Write-Host "  External:      https://totalcode.indevs.in" -ForegroundColor Cyan
-    Write-Host "  External API:  https://totalcode.indevs.in/api/health" -ForegroundColor Cyan
+Write-Host "  External:      $publicOrigin" -ForegroundColor Cyan
+Write-Host "  External API:  $externalApiHealthUrl" -ForegroundColor Cyan
+if ($noTunnel) {
+    Write-Host '  Tunnel mode:   disabled' -ForegroundColor DarkYellow
+} else {
+    Write-Host '  Tunnel mode:   cloudflared' -ForegroundColor DarkYellow
 }
 Write-Host ''
 Write-Host "  PID file:      $pidsFile" -ForegroundColor Gray
@@ -565,6 +777,9 @@ Write-Host "  Logs:          $runtimeDir" -ForegroundColor Gray
 Write-Host ''
 Write-Host "  API:           PID $($apiProcess.Id)" -ForegroundColor Gray
 Write-Host "  Caddy:         PID $($caddyProcess.Id)" -ForegroundColor Gray
+if ($frpcProcess) {
+    Write-Host "  frpc:          PID $($frpcProcess.Id)" -ForegroundColor Gray
+}
 if ($cloudflaredProcess) {
     Write-Host "  Cloudflared:   PID $($cloudflaredProcess.Id)" -ForegroundColor Gray
 }

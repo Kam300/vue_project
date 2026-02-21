@@ -81,3 +81,59 @@ npm run dev
 ```
 
 В dev-режиме Vite проксирует `/api/*` на `http://127.0.0.1:5000`.
+
+## FamilyOne Web App (`/app`)
+
+- `/` остается лендингом.
+- Основное web-приложение: `/app`.
+- Основные маршруты:
+  - `/app/members`, `/app/members/new`, `/app/members/:id`
+  - `/app/tree`
+  - `/app/photos`
+  - `/app/export`
+  - `/app/backup`
+  - `/app/server`
+  - `/app/settings`
+  - `/app/about`
+  - `/app/onboarding`
+  - `/app/lock`
+
+## Frontend Env
+
+Добавьте в `.env` (frontend):
+
+```env
+VITE_API_BASE=/api
+VITE_APP_VERSION=1.0.0
+VITE_GOOGLE_WEB_CLIENT_ID=YOUR_GOOGLE_WEB_CLIENT_ID.apps.googleusercontent.com
+```
+
+## Scripts
+
+```powershell
+npm run dev
+npm run typecheck
+npm run build
+```
+
+## Технологии web app
+
+- Vue 3 + TypeScript
+- Vue Router + Pinia
+- Dexie (IndexedDB, local-first)
+- Zod (валидация)
+- JSZip (backup ZIP)
+- Vite PWA plugin (manifest + service worker)
+
+## Google OAuth (backup)
+
+Для fallback popup-авторизации добавьте в Google Cloud Console для вашего OAuth Web Client:
+
+- Authorized JavaScript origins:
+  - `https://totalcode.indevs.in`
+  - `http://localhost:5173`
+  - `http://127.0.0.1:5173`
+- Authorized redirect URIs:
+  - `https://totalcode.indevs.in/google-oauth-popup.html`
+  - `http://localhost:5173/google-oauth-popup.html`
+  - `http://127.0.0.1:5173/google-oauth-popup.html`

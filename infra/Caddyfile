@@ -1,4 +1,4 @@
-﻿:8080 {
+(familyone_app) {
     encode gzip
 
     @legacy path /health /register_face /recognize_face /delete_face/* /list_faces /clear_all /generate_pdf /download_pdf/*
@@ -18,3 +18,10 @@
     }
 }
 
+:8080 {
+    import familyone_app
+}
+
+totalcode.online, www.totalcode.online {
+    import familyone_app
+}

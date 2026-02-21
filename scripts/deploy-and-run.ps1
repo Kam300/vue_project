@@ -87,6 +87,74 @@ function Wait-HttpOk {
     return $false
 }
 
+function Get-EnvValue {
+    param(
+        [string]$FilePath,
+        [string]$Name,
+        [string]$DefaultValue = ''
+    )
+
+    if (-not (Test-Path $FilePath)) {
+        return $DefaultValue
+    }
+
+    $raw = Get-Content $FilePath -ErrorAction SilentlyContinue
+    foreach ($line in $raw) {
+        if (-not $line) { continue }
+        $trimmed = $line.Trim()
+        if ($trimmed.StartsWith('#')) { continue }
+        if ($trimmed -notmatch '=') { continue }
+
+        $pair = $trimmed.Split('=', 2)
+        $key = $pair[0].Trim()
+        if ($key -ne $Name) { continue }
+
+        $value = $pair[1].Trim().Trim('"').Trim("'")
+        if ($value) { return $value }
+    }
+
+    return $DefaultValue
+}
+
+function Normalize-Origin {
+    param([string]$Value, [string]$DefaultValue)
+    $candidate = ''
+    if ($null -ne $Value) {
+        $candidate = [string]$Value
+    }
+    $candidate = $candidate.Trim()
+    if (-not $candidate) { $candidate = $DefaultValue }
+    return $candidate.TrimEnd('/')
+}
+
+function Remove-BrokenPipDistributions {
+    param([string]$VenvRoot)
+
+    $sitePackages = Join-Path $VenvRoot 'Lib\site-packages'
+    if (-not (Test-Path $sitePackages)) {
+        return
+    }
+
+    $brokenEntries = Get-ChildItem -Path $sitePackages -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^~' }
+
+    if (-not $brokenEntries) {
+        return
+    }
+
+    $removed = @()
+    foreach ($entry in $brokenEntries) {
+        Remove-Item -Path $entry.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path $entry.FullName)) {
+            $removed += $entry.Name
+        }
+    }
+
+    if ($removed.Count -gt 0) {
+        Write-Host "Removed broken pip artifacts: $($removed -join ', ')"
+    }
+}
+
 function Start-ManagedProcess {
     param(
         [string]$Name,
@@ -280,6 +348,14 @@ if (-not (Test-Path $backendEnvFile)) {
     Write-Host 'Created backend/.env from .env.example'
 }
 
+$defaultPublicOrigin = 'https://totalcode.indevs.in'
+$publicOrigin = Normalize-Origin (Get-EnvValue -FilePath $backendEnvFile -Name 'PUBLIC_ORIGIN' -DefaultValue $defaultPublicOrigin) $defaultPublicOrigin
+$externalChecks = @(
+    "$publicOrigin/",
+    "$publicOrigin/api/health",
+    "$publicOrigin/health"
+)
+
 $stopScript = Join-Path $repoRoot 'scripts\stop-all.ps1'
 if (Test-Path $stopScript) {
     Write-Host 'Stopping previous managed processes (if any)...'
@@ -332,6 +408,10 @@ print("face stack ok")
 print(f"dlib cuda: use_cuda={bool(getattr(dlib, 'DLIB_USE_CUDA', False))}, devices={int(dlib.cuda.get_num_devices())}")
 '@
 
+    if ($isWindowsPlatform) {
+        Remove-BrokenPipDistributions -VenvRoot $venvDir
+    }
+
     & $venvPython -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) {
         throw 'pip upgrade failed.'
@@ -343,7 +423,16 @@ print(f"dlib cuda: use_cuda={bool(getattr(dlib, 'DLIB_USE_CUDA', False))}, devic
         $pipFreeze = & $venvPython -m pip list --format=freeze
         $hasDlibBin = $pipFreeze -match '^dlib-bin=='
         if ($hasDlibBin) {
-            & $venvPython -m pip uninstall -y dlib-bin *> $null
+            $previousErrorAction = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                & $venvPython -m pip uninstall -y dlib-bin *> $null
+            } finally {
+                $ErrorActionPreference = $previousErrorAction
+            }
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "pip uninstall dlib-bin exited with code $LASTEXITCODE. Continuing."
+            }
         }
         $requirementsToInstall = Join-Path $runtimeDir 'requirements.no-dlib-bin.txt'
         (Get-Content $requirementsPath) |
@@ -447,12 +536,6 @@ Run-Step -Name 'Health checks (local)' -Action {
 }
 
 Write-Host '==> Health checks (external)'
-$externalChecks = @(
-    'https://totalcode.indevs.in/',
-    'https://totalcode.indevs.in/api/health',
-    'https://totalcode.indevs.in/health'
-)
-
 foreach ($url in $externalChecks) {
     if (Wait-HttpOk -Url $url -Attempts 5 -DelaySeconds 2) {
         Write-Host "  OK  $url"

@@ -45,6 +45,19 @@
   --shadow-glow: 0 0 40px rgba(124, 92, 252, 0.2);
 }
 
+:root[data-theme='light'] {
+  --color-bg: #f3f6fb;
+  --color-bg-alt: #ffffff;
+  --color-surface: rgba(8, 16, 40, 0.04);
+  --color-surface-hover: rgba(8, 16, 40, 0.09);
+  --color-glass: rgba(255, 255, 255, 0.84);
+  --color-glass-border: rgba(8, 16, 40, 0.1);
+  --color-text: rgba(18, 24, 39, 0.95);
+  --color-text-secondary: rgba(18, 24, 39, 0.68);
+  --color-text-muted: rgba(18, 24, 39, 0.48);
+  --shadow-card: 0 14px 28px rgba(33, 46, 77, 0.12);
+}
+
 *,
 *::before,
 *::after {
