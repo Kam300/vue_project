@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "createdAtUtc": "2026-02-20T20:12:03.627Z",
+  "createdAtUtc": "2026-02-25T05:37:02Z",
   "compression": "jpeg_1280_q80",
-  "sizeBytes": 3526312,
-  "membersCount": 5,
-  "memberPhotosCount": 23,
-  "assetsCount": 25,
-  "checksumSha256": "38af029b6067ce6def0845a27e9da13399c52f4429622aa6464b0d77622301a9",
-  "updatedAtUtc": "2026-02-20T20:12:06.672530Z"
+  "sizeBytes": 405808,
+  "membersCount": 8,
+  "memberPhotosCount": 0,
+  "assetsCount": 4,
+  "checksumSha256": "b8af974684c3c61a1684e5106361d1b0fe04111efd7fb4d940f8e9e026c9a57e",
+  "updatedAtUtc": "2026-02-25T05:37:01.086502Z"
 }

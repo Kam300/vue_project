@@ -4,6 +4,7 @@ import type { FamilyMember, MemberPhoto } from '@/types/models'
 import {
   addMemberPhoto,
   clearMemberPhotos,
+  deleteAllMembers,
   deleteMember,
   deleteMemberPhoto,
   getAllMembers,
@@ -40,6 +41,11 @@ export const useMemberStore = defineStore('members', () => {
 
   async function removeMember(memberId: number): Promise<void> {
     await deleteMember(memberId)
+    await refresh()
+  }
+
+  async function removeAllMembers(): Promise<void> {
+    await deleteAllMembers()
     await refresh()
   }
 
@@ -103,6 +109,7 @@ export const useMemberStore = defineStore('members', () => {
     refresh,
     saveMember,
     removeMember,
+    removeAllMembers,
     removeAllMemberPhotos,
     addPhotoToMember,
     removePhoto

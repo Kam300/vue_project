@@ -17,6 +17,7 @@ from datetime import datetime
 import time
 import pickle
 import hashlib
+import re
 import tempfile
 import zipfile
 from pathlib import Path
@@ -107,7 +108,17 @@ def configure_windows_dll_dirs():
 
 
 configure_windows_dll_dirs()
-import face_recognition
+face_recognition = None
+FACE_RECOGNITION_AVAILABLE = False
+FACE_RECOGNITION_IMPORT_ERROR = ''
+
+try:
+    import face_recognition as _face_recognition
+    face_recognition = _face_recognition
+    FACE_RECOGNITION_AVAILABLE = True
+except Exception as exc:
+    FACE_RECOGNITION_IMPORT_ERROR = str(exc)
+    logger.warning("Face recognition runtime unavailable: %s", exc)
 
 
 def load_env_file(env_path):
@@ -201,6 +212,14 @@ def make_response_json(data, status=200):
         mimetype='application/json',
         headers={'Content-Length': str(len(response_data.encode('utf-8')))}
     )
+
+
+def face_recognition_unavailable_response():
+    return make_response_json({
+        'success': False,
+        'error': 'Face recognition is unavailable on this server',
+        'details': FACE_RECOGNITION_IMPORT_ERROR or 'unsupported CPU/runtime'
+    }, 503)
 
 
 # ========================================
@@ -983,6 +1002,10 @@ FONT_REGULAR, FONT_BOLD, FONT_ITALIC = setup_fonts()
 # FACE RECOGNITION - Функции
 # ========================================
 
+FACE_DUPLICATE_NAME_DISTANCE = 0.42
+LEGACY_MEMBER_ID_MOD = 1_000_000
+STABLE_SERVER_MEMBER_ID_PATTERN = re.compile(r'^fo1_(\d+)_([0-9a-f]{16})$', re.IGNORECASE)
+
 def load_encodings():
     """Загрузка сохраненных кодировок лиц"""
     global face_encodings_db
@@ -990,14 +1013,22 @@ def load_encodings():
         try:
             with open(ENCODINGS_FILE, 'r') as f:
                 data = json.load(f)
-                # Конвертируем списки обратно в numpy arrays
-                face_encodings_db = {
-                    member_id: {
-                        'name': info['name'],
-                        'encoding': np.array(info['encoding'])
-                    }
-                    for member_id, info in data.items()
-                }
+                parsed = {}
+                for member_id, info in data.items():
+                    if not isinstance(info, dict):
+                        continue
+                    raw_encoding = info.get('encoding')
+                    if raw_encoding is None:
+                        continue
+                    try:
+                        parsed[str(member_id)] = {
+                            'name': str(info.get('name', '')).strip(),
+                            'encoding': np.array(raw_encoding),
+                            'image_hash': str(info.get('image_hash', '')).strip()
+                        }
+                    except Exception:
+                        continue
+                face_encodings_db = parsed
             logger.info(f"Загружено {len(face_encodings_db)} кодировок лиц")
         except Exception as e:
             logger.error(f"Ошибка загрузки кодировок: {e}")
@@ -1007,19 +1038,120 @@ def load_encodings():
 def save_encodings():
     """Сохранение кодировок лиц"""
     try:
-        # Конвертируем numpy arrays в списки для JSON
-        data = {
-            member_id: {
-                'name': info['name'],
-                'encoding': info['encoding'].tolist()
+        data = {}
+        for member_id, info in face_encodings_db.items():
+            encoding = info.get('encoding')
+            if encoding is None:
+                continue
+            data[str(member_id)] = {
+                'name': str(info.get('name', '')).strip(),
+                'encoding': encoding.tolist(),
+                'image_hash': str(info.get('image_hash', '')).strip()
             }
-            for member_id, info in face_encodings_db.items()
-        }
         with open(ENCODINGS_FILE, 'w') as f:
             json.dump(data, f)
         logger.info("Кодировки сохранены")
     except Exception as e:
         logger.error(f"Ошибка сохранения кодировок: {e}")
+
+
+def normalize_member_name(name):
+    return ' '.join(str(name or '').strip().lower().split())
+
+
+def get_face_image_sha256(image_array):
+    try:
+        return hashlib.sha256(image_array.tobytes()).hexdigest()
+    except Exception:
+        return ''
+
+
+def normalize_device_id(raw_device_id):
+    value = str(raw_device_id or '').strip()
+    if not value or not value.isdigit():
+        return ''
+    try:
+        numeric_value = int(value)
+    except ValueError:
+        return ''
+    return str(numeric_value) if numeric_value > 0 else ''
+
+
+def get_device_id_from_member_id(raw_member_id):
+    member_id = str(raw_member_id or '').strip()
+    if not member_id:
+        return ''
+
+    stable_match = STABLE_SERVER_MEMBER_ID_PATTERN.match(member_id)
+    if stable_match:
+        return stable_match.group(1)
+
+    if member_id.isdigit():
+        try:
+            numeric_member_id = int(member_id)
+        except ValueError:
+            return ''
+        if numeric_member_id >= LEGACY_MEMBER_ID_MOD:
+            return str(numeric_member_id // LEGACY_MEMBER_ID_MOD)
+
+    return ''
+
+
+def get_known_faces_for_device_scope(device_id):
+    normalized_device_id = normalize_device_id(device_id)
+    if not normalized_device_id:
+        return list(face_encodings_db.items())
+
+    scoped_faces = []
+    for known_member_id, info in face_encodings_db.items():
+        member_device_id = get_device_id_from_member_id(known_member_id)
+        if member_device_id and member_device_id == normalized_device_id:
+            scoped_faces.append((known_member_id, info))
+    return scoped_faces
+
+
+def find_existing_face_duplicate(member_id, member_name, image_hash, face_encoding):
+    normalized_name = normalize_member_name(member_name)
+    member_id = str(member_id).strip()
+
+    for existing_member_id, info in face_encodings_db.items():
+        existing_member_id = str(existing_member_id).strip()
+        if existing_member_id == member_id:
+            continue
+
+        existing_hash = str(info.get('image_hash', '')).strip()
+        if image_hash and existing_hash and image_hash == existing_hash:
+            return {
+                'member_id': existing_member_id,
+                'name': str(info.get('name', '')).strip(),
+                'reason': 'image_hash'
+            }
+
+        if not normalized_name:
+            continue
+
+        existing_name = normalize_member_name(info.get('name', ''))
+        if existing_name != normalized_name:
+            continue
+
+        existing_encoding = info.get('encoding')
+        if existing_encoding is None:
+            continue
+
+        try:
+            distance = float(face_recognition.face_distance([existing_encoding], face_encoding)[0])
+        except Exception:
+            continue
+
+        if distance <= FACE_DUPLICATE_NAME_DISTANCE:
+            return {
+                'member_id': existing_member_id,
+                'name': str(info.get('name', '')).strip(),
+                'reason': 'name_encoding',
+                'distance': distance
+            }
+
+    return None
 
 
 def get_image_hash(image_array):
@@ -1484,7 +1616,8 @@ def health_check():
     return make_response_json({
         'status': 'ok',
         'service': 'combined_server',
-        'face_recognition': True,
+        'face_recognition': FACE_RECOGNITION_AVAILABLE,
+        'face_recognition_error': '' if FACE_RECOGNITION_AVAILABLE else FACE_RECOGNITION_IMPORT_ERROR,
         'pdf_generation': True,
         'backup': True,
         'members_count': len(face_encodings_db),
@@ -1494,7 +1627,7 @@ def health_check():
             'active_cuda': CUDA_ENABLED,
             'dlib_use_cuda': DLIB_USE_CUDA,
             'cuda_devices': CUDA_DEVICE_COUNT,
-            'face_model': FACE_MODEL,
+            'face_model': FACE_MODEL if FACE_RECOGNITION_AVAILABLE else 'unavailable',
             'reason': '' if CUDA_ENABLED else CUDA_DISABLED_REASON
         }
     })
@@ -1676,10 +1809,13 @@ def register_face():
     - member_name: Имя члена семьи
     - image: base64 изображение
     """
+    if not FACE_RECOGNITION_AVAILABLE:
+        return face_recognition_unavailable_response()
+
     try:
-        data = request.json
-        member_id = data.get('member_id')
-        member_name = data.get('member_name')
+        data = request.get_json(silent=True) or {}
+        member_id = str(data.get('member_id', '')).strip()
+        member_name = str(data.get('member_name', '')).strip()
         image_base64 = data.get('image')
 
         if not all([member_id, member_name, image_base64]):
@@ -1720,10 +1856,33 @@ def register_face():
                 'error': 'Не удалось получить кодировку лица'
             }, 400)
 
+        image_hash = get_face_image_sha256(image)
+        duplicate = find_existing_face_duplicate(
+            member_id=member_id,
+            member_name=member_name,
+            image_hash=image_hash,
+            face_encoding=face_encodings[0]
+        )
+        if duplicate is not None:
+            logger.info(
+                "Дубликат регистрации лица отклонен: requested_id=%s, existing_id=%s, reason=%s",
+                member_id,
+                duplicate['member_id'],
+                duplicate['reason']
+            )
+            return make_response_json({
+                'success': True,
+                'message': f"Лицо уже зарегистрировано (ID: {duplicate['member_id']})",
+                'member_id': duplicate['member_id'],
+                'duplicate': True,
+                'duplicate_reason': duplicate['reason']
+            })
+
         # Сохраняем кодировку
-        face_encodings_db[str(member_id)] = {
+        face_encodings_db[member_id] = {
             'name': member_name,
-            'encoding': face_encodings[0]
+            'encoding': face_encodings[0],
+            'image_hash': image_hash
         }
 
         # Сохраняем эталонное фото
@@ -1758,16 +1917,28 @@ def recognize_face():
     Параметры:
     - image: base64 изображение
     - threshold: порог совпадения (по умолчанию 0.6)
+    - device_id: ID устройства для ограничения распознавания только своими членами (опционально)
     """
+    if not FACE_RECOGNITION_AVAILABLE:
+        return face_recognition_unavailable_response()
+
     try:
-        data = request.json
+        data = request.json or {}
         image_base64 = data.get('image')
         threshold = data.get('threshold', 0.6)
+        raw_device_id = data.get('device_id')
+        device_id = normalize_device_id(raw_device_id)
 
         if not image_base64:
             return make_response_json({
                 'success': False,
                 'error': 'Отсутствует изображение'
+            }, 400)
+
+        if raw_device_id is not None and not device_id:
+            return make_response_json({
+                'success': False,
+                'error': 'Некорректный device_id'
             }, 400)
 
         if len(face_encodings_db) == 0:
@@ -1799,10 +1970,25 @@ def recognize_face():
         # Результаты распознавания
         results = []
 
-        # Получаем известные кодировки
-        known_encodings = [info['encoding'] for info in face_encodings_db.values()]
-        known_ids = list(face_encodings_db.keys())
-        known_names = [info['name'] for info in face_encodings_db.values()]
+        # Получаем известные кодировки (с учетом scope по устройству, если передан device_id)
+        known_faces = get_known_faces_for_device_scope(device_id)
+        if len(known_faces) == 0:
+            return make_response_json({
+                'success': False,
+                'error': 'Нет зарегистрированных лиц для текущего пользователя'
+            }, 400)
+
+        if device_id:
+            logger.info(
+                "Распознавание с ограничением device_id=%s: %s лиц из %s",
+                device_id,
+                len(known_faces),
+                len(face_encodings_db)
+            )
+
+        known_encodings = [info['encoding'] for _, info in known_faces]
+        known_ids = [str(member_id) for member_id, _ in known_faces]
+        known_names = [info['name'] for _, info in known_faces]
 
         # Проверяем каждое лицо на фото
         for face_encoding, face_location in zip(face_encodings, face_locations):
@@ -1928,30 +2114,69 @@ def list_faces():
 @app.route('/api/clear_all', methods=['DELETE'])
 @app.route('/clear_all', methods=['DELETE'])
 def clear_all():
-    """Очистка всей базы распознавания лиц"""
+    """Очистка базы распознавания лиц (глобально или по device_id)"""
     global face_encodings_db
     try:
-        count = len(face_encodings_db)
+        raw_device_id = request.args.get('device_id')
+        if raw_device_id is None and request.is_json:
+            body = request.get_json(silent=True) or {}
+            raw_device_id = body.get('device_id')
+        device_id = normalize_device_id(raw_device_id)
 
-        # Очищаем базу в памяти
-        face_encodings_db = {}
+        if raw_device_id is not None and not device_id:
+            return make_response_json({
+                'success': False,
+                'error': 'Некорректный device_id'
+            }, 400)
 
-        # Удаляем файл кодировок
-        if os.path.exists(ENCODINGS_FILE):
-            os.remove(ENCODINGS_FILE)
+        if not device_id:
+            count = len(face_encodings_db)
 
-        # Удаляем все эталонные фото
-        for filename in os.listdir(REFERENCE_PHOTOS_DIR):
-            filepath = os.path.join(REFERENCE_PHOTOS_DIR, filename)
-            if os.path.isfile(filepath):
-                os.remove(filepath)
+            # Очищаем базу в памяти
+            face_encodings_db = {}
 
-        logger.info(f"База очищена. Удалено {count} лиц")
+            # Удаляем файл кодировок
+            if os.path.exists(ENCODINGS_FILE):
+                os.remove(ENCODINGS_FILE)
+
+            # Удаляем все эталонные фото
+            for filename in os.listdir(REFERENCE_PHOTOS_DIR):
+                filepath = os.path.join(REFERENCE_PHOTOS_DIR, filename)
+                if os.path.isfile(filepath):
+                    os.remove(filepath)
+
+            logger.info(f"База очищена глобально. Удалено {count} лиц")
+
+            return make_response_json({
+                'success': True,
+                'message': f'База очищена. Удалено {count} лиц',
+                'deleted_count': count
+            })
+
+        known_faces = get_known_faces_for_device_scope(device_id)
+        member_ids_to_remove = [str(member_id) for member_id, _ in known_faces]
+
+        for member_id in member_ids_to_remove:
+            if member_id in face_encodings_db:
+                del face_encodings_db[member_id]
+            photo_path = os.path.join(REFERENCE_PHOTOS_DIR, f"{member_id}.jpg")
+            if os.path.exists(photo_path):
+                os.remove(photo_path)
+
+        save_encodings()
+
+        deleted_count = len(member_ids_to_remove)
+        logger.info(
+            "База очищена по device_id=%s. Удалено %s лиц",
+            device_id,
+            deleted_count
+        )
 
         return make_response_json({
             'success': True,
-            'message': f'База очищена. Удалено {count} лиц',
-            'deleted_count': count
+            'message': f'Удалено {deleted_count} лиц для устройства {device_id}',
+            'deleted_count': deleted_count,
+            'device_id': device_id
         })
 
     except Exception as e:
@@ -1972,7 +2197,13 @@ def generate_pdf():
     try:
         data = request.json
         logger.info(f"PDF request keys: {list(data.keys())}")
-        logger.info(f"PDF raw show_photos={data.get('show_photos')}, show_dates={data.get('show_dates')}, show_patronymic={data.get('show_patronymic')}, title={data.get('title')}")
+        logger.info(
+            "PDF raw show_photos=%s, show_dates=%s, show_patronymic=%s, title=%s",
+            data.get('show_photos'),
+            data.get('show_dates'),
+            data.get('show_patronymic'),
+            data.get('title'),
+        )
         members = data.get('members', [])
         page_format = data.get('format', 'A4_LANDSCAPE')
         use_drive = data.get('use_drive', True)
@@ -2208,7 +2439,8 @@ def draw_family_tree(c, members, width, height, settings=None):
         content_h += max(6, min(9, int(8 * s))) + 1
     if show_dates:
         content_h += max(6, min(9, int(8 * s))) + 2
-    
+    content_h += max(6, min(9, int(8 * s))) + 1
+
     card_height = int(content_h)
 
     # Вычисляем общее кол-во строк всех поколений
@@ -2678,6 +2910,14 @@ def draw_member_card(c, member, x, y, w, h, settings=None):
     c.drawCentredString(x + w/2, curr_y, role)
     curr_y -= role_font + 1
 
+    social_roles = format_social_roles(member)
+    if social_roles and curr_y > y + inset + detail_font:
+        c.setFillColorRGB(0.35, 0.28, 0.18)
+        social_roles = fit_text(social_roles, FONT_REGULAR, detail_font)
+        c.setFont(FONT_REGULAR, detail_font)
+        c.drawCentredString(x + w/2, curr_y, social_roles)
+        curr_y -= detail_font + 1
+
     # Дата
     if show_dates:
         birth = member.get('birthDate', '')
@@ -2940,6 +3180,22 @@ def get_gender_order(role):
     elif role in female_roles:
         return 2
     return 3
+
+
+def format_social_roles(member):
+    if not isinstance(member, dict):
+        return ''
+
+    value = member.get('socialRoles')
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        return ', '.join(parts)
+
+    if value is None:
+        return ''
+
+    return str(value).strip()
+
 
 
 # ========================================

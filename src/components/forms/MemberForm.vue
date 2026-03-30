@@ -27,6 +27,7 @@ const form = reactive<FamilyMember>({
   birthDate: '',
   phoneNumber: '',
   role: 'OTHER',
+  socialRoles: '',
   photoUri: '',
   maidenName: '',
   fatherId: null,
@@ -45,6 +46,7 @@ function syncFromModel(source?: FamilyMember | null): void {
     birthDate: '',
     phoneNumber: '',
     role: 'OTHER',
+    socialRoles: '',
     photoUri: '',
     maidenName: '',
     fatherId: null,
@@ -58,7 +60,8 @@ function syncFromModel(source?: FamilyMember | null): void {
     weddingDate: normalized.weddingDate
       ? normalizeDateToDisplayFormat(normalized.weddingDate)
       : '',
-    phoneNumber: normalized.phoneNumber || ''
+    phoneNumber: normalized.phoneNumber || '',
+    socialRoles: normalized.socialRoles || ''
   })
 }
 
@@ -119,6 +122,7 @@ function submitForm(): void {
     lastName: form.lastName.trim(),
     patronymic: form.patronymic?.trim() || null,
     phoneNumber: form.phoneNumber ? normalizePhone(form.phoneNumber) : null,
+    socialRoles: form.socialRoles?.trim() || null,
     birthDate: normalizeDateToDisplayFormat(form.birthDate),
     weddingDate: showWedding.value && form.weddingDate ? normalizeDateToDisplayFormat(form.weddingDate) : null,
     maidenName: form.maidenName?.trim() || null,
@@ -177,6 +181,15 @@ function submitForm(): void {
             {{ option.label }}
           </option>
         </select>
+      </div>
+      <div class="field">
+        <label>Социальные/профессиональные роли</label>
+        <input
+          v-model="form.socialRoles"
+          type="text"
+          placeholder="Например: священник, офицер, купец"
+        />
+        <span v-if="errors.socialRoles" class="error">{{ errors.socialRoles }}</span>
       </div>
       <div class="field">
         <label>Телефон</label>

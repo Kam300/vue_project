@@ -27,6 +27,7 @@ export function exportMembersToJson(members: FamilyMember[]): string {
     gender: member.gender,
     birthDate: normalizeDateToDisplayFormat(member.birthDate),
     role: member.role,
+    socialRoles: member.socialRoles || '',
     phoneNumber: member.phoneNumber || '',
     fatherId: member.fatherId ?? null,
     motherId: member.motherId ?? null,
@@ -46,6 +47,7 @@ export function exportMembersToCsv(members: FamilyMember[]): string {
     'Дата рождения',
     'Телефон',
     'Роль',
+    'Социальные/профессиональные роли',
     'Дата свадьбы',
     'Девичья фамилия'
   ]
@@ -59,6 +61,7 @@ export function exportMembersToCsv(members: FamilyMember[]): string {
       normalizeDateToDisplayFormat(member.birthDate),
       member.phoneNumber || '',
       ROLE_LABELS[member.role],
+      member.socialRoles || '',
       member.weddingDate || '',
       member.maidenName || ''
     ]
@@ -78,6 +81,16 @@ function normalizeIncomingMember(raw: Partial<FamilyMember>): FamilyMember {
     birthDate: normalizeDateToDisplayFormat(String(raw.birthDate || '')),
     phoneNumber: (raw.phoneNumber || '').toString().trim() || null,
     role: (raw.role || 'OTHER') as FamilyMember['role'],
+    socialRoles:
+      (
+        raw.socialRoles ||
+        (raw as Record<string, unknown>).socialRole ||
+        (raw as Record<string, unknown>).profession ||
+        (raw as Record<string, unknown>).occupation ||
+        ''
+      )
+        .toString()
+        .trim() || null,
     photoUri: null,
     maidenName: (raw.maidenName || '').toString().trim() || null,
     fatherId: typeof raw.fatherId === 'number' ? raw.fatherId : null,

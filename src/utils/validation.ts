@@ -37,6 +37,12 @@ export const memberSchema = z.object({
     ],
     { error: 'Выберите роль' }
   ),
+  socialRoles: z
+    .string()
+    .trim()
+    .max(160, 'Слишком длинное описание ролей')
+    .optional()
+    .nullable(),
   maidenName: z.string().trim().optional().nullable(),
   fatherId: z.number().nullable().optional(),
   motherId: z.number().nullable().optional(),

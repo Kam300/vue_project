@@ -37,6 +37,7 @@ $venvDir            = Join-Path $backendDir '.venv'
 $venvPython         = Join-Path $venvDir 'Scripts\python.exe'
 $frpcExePath        = 'C:\frp\frpc.exe'
 $frpcConfigPath     = 'C:\frp\frpc.toml'
+$caddyConfigPath    = Join-Path $repoRoot 'infra\Caddyfile'
 
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 
@@ -154,6 +155,39 @@ function Resolve-PythonCommand {
     return $null
 }
 
+function Invoke-NativeMerged {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments = @()
+    )
+
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $rawOutput = & $FilePath @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+
+    $lines = @()
+    foreach ($item in @($rawOutput)) {
+        if ($null -eq $item) { continue }
+
+        if ($item -is [System.Management.Automation.ErrorRecord]) {
+            $lines += $item.ToString()
+            continue
+        }
+
+        $lines += [string]$item
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        Output   = ($lines -join [Environment]::NewLine).Trim()
+    }
+}
+
 function Wait-ForHttp {
     param(
         [string]$Url,
@@ -256,6 +290,79 @@ function Test-PythonModule {
     }
 }
 
+function Get-ProcessMetadata {
+    param([string]$ProcessName)
+
+    $name = [string]$ProcessName
+    if (-not $name) {
+        return @()
+    }
+
+    if (-not $name.EndsWith('.exe', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $name = "$name.exe"
+    }
+
+    return @(
+        Get-CimInstance Win32_Process -Filter "Name = '$name'" -ErrorAction SilentlyContinue
+    )
+}
+
+function Stop-MatchingProcesses {
+    param(
+        [string]$ProcessName,
+        [string[]]$MatchTerms,
+        [string]$FriendlyName,
+        [int]$DelaySeconds = 0
+    )
+
+    $terms = @(
+        $MatchTerms |
+            Where-Object { $_ } |
+            ForEach-Object { ([string]$_).ToLowerInvariant() } |
+            Select-Object -Unique
+    )
+
+    if ($terms.Count -eq 0) {
+        return
+    }
+
+    $matches = @()
+    foreach ($proc in Get-ProcessMetadata -ProcessName $ProcessName) {
+        $searchText = @(
+            [string]$proc.ExecutablePath
+            [string]$proc.CommandLine
+        ) -join "`n"
+        $searchText = $searchText.ToLowerInvariant()
+
+        $matched = $false
+        foreach ($term in $terms) {
+            if ($searchText.Contains($term)) {
+                $matched = $true
+                break
+            }
+        }
+
+        if ($matched) {
+            $matches += $proc
+        }
+    }
+
+    $stopped = 0
+    foreach ($proc in $matches) {
+        try {
+            Stop-Process -Id ([int]$proc.ProcessId) -Force -ErrorAction SilentlyContinue
+            $stopped++
+        } catch {}
+    }
+
+    if ($stopped -gt 0) {
+        Write-Ok "Stopped $stopped stale $FriendlyName process(es)"
+        if ($DelaySeconds -gt 0) {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+}
+
 function Start-BackgroundProcess {
     param(
         [string]$Name,
@@ -341,28 +448,22 @@ if (Test-Path $pidsFile) {
 }
 
 # Убиваем все оставшиеся Python-процессы (чтобы не было зомби со старым кодом)
-$pythonProcs = Get-Process python -ErrorAction SilentlyContinue
-if ($pythonProcs) {
-    $pythonProcs | Stop-Process -Force -ErrorAction SilentlyContinue
-    Write-Ok "Stopped $(@($pythonProcs).Count) stale Python process(es)"
-    Start-Sleep -Seconds 2
-}
+Stop-MatchingProcesses -ProcessName 'python' -FriendlyName 'Python' -DelaySeconds 2 -MatchTerms @(
+    $backendDir,
+    'telegram_service.py'
+)
 
-# Stop orphaned Caddy processes that can keep admin port 2019 busy.
-$caddyProcs = Get-Process caddy -ErrorAction SilentlyContinue
-if ($caddyProcs) {
-    $caddyProcs | Stop-Process -Force -ErrorAction SilentlyContinue
-    Write-Ok "Stopped $(@($caddyProcs).Count) stale Caddy process(es)"
-    Start-Sleep -Seconds 1
-}
+# Stop orphaned project Caddy processes that can keep admin port 2019 busy.
+Stop-MatchingProcesses -ProcessName 'caddy' -FriendlyName 'Caddy' -DelaySeconds 1 -MatchTerms @(
+    $caddyConfigPath,
+    $repoRoot
+)
 
-# Stop stale frpc instances to avoid duplicate proxy registration errors.
-$frpcProcs = Get-Process frpc -ErrorAction SilentlyContinue
-if ($frpcProcs) {
-    $frpcProcs | Stop-Process -Force -ErrorAction SilentlyContinue
-    Write-Ok "Stopped $(@($frpcProcs).Count) stale frpc process(es)"
-    Start-Sleep -Seconds 1
-}
+# Stop stale project frpc instances to avoid duplicate proxy registration errors.
+Stop-MatchingProcesses -ProcessName 'frpc' -FriendlyName 'frpc' -DelaySeconds 1 -MatchTerms @(
+    $frpcExePath,
+    $frpcConfigPath
+)
 
 # ========================================
 # STEP 2: CHECK & INSTALL DEPENDENCIES
@@ -406,8 +507,11 @@ if (-not $pythonCmd) {
     }
 }
 $pyVersionArgs = if ($pythonCmd -eq 'py') { @('-3', '--version') } else { @('--version') }
-$pyVersion = & $pythonCmd @pyVersionArgs 2>&1
-Write-Ok "$pyVersion"
+$pyVersionResult = Invoke-NativeMerged -FilePath $pythonCmd -Arguments $pyVersionArgs
+if ($pyVersionResult.ExitCode -ne 0) {
+    throw 'Failed to detect Python version.'
+}
+Write-Ok "$($pyVersionResult.Output)"
 
 # -- Caddy --
 $caddyPaths = @('C:\Program Files\Caddy\caddy.exe')
@@ -525,10 +629,13 @@ if ($isWindows) {
 $modelsInstalled = Test-PythonModule -PythonExe $venvPython -ModuleName 'face_recognition_models'
 if (-not $modelsInstalled) {
     Write-Step 'face_recognition_models NOT installed. Installing from git...'
-    & $venvPython -m pip install --force-reinstall "git+https://github.com/ageitgey/face_recognition_models" 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $modelsInstallResult = Invoke-NativeMerged -FilePath $venvPython -Arguments @('-m', 'pip', 'install', '--force-reinstall', 'git+https://github.com/ageitgey/face_recognition_models')
+    if ($modelsInstallResult.ExitCode -ne 0) {
         Write-Warn 'git install failed. Trying without --force-reinstall...'
-        & $venvPython -m pip install "git+https://github.com/ageitgey/face_recognition_models" 2>&1
+        $modelsInstallRetryResult = Invoke-NativeMerged -FilePath $venvPython -Arguments @('-m', 'pip', 'install', 'git+https://github.com/ageitgey/face_recognition_models')
+        if ($modelsInstallRetryResult.ExitCode -ne 0 -and $modelsInstallRetryResult.Output) {
+            Write-Warn $modelsInstallRetryResult.Output
+        }
     }
     # Verify it installed
     $modelsInstalled = Test-PythonModule -PythonExe $venvPython -ModuleName 'face_recognition_models'
@@ -610,7 +717,6 @@ $apiProcess = Start-BackgroundProcess -Name 'Flask API' `
     -WaitMs 3000
 
 # Caddy
-$caddyConfigPath = Join-Path $repoRoot 'infra\Caddyfile'
 $hadCaddyAdminEnv = Test-Path Env:\CADDY_ADMIN
 $prevCaddyAdminEnv = $null
 if ($hadCaddyAdminEnv) {

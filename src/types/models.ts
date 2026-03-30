@@ -26,6 +26,7 @@ export interface FamilyMember {
   birthDate: string
   phoneNumber?: string | null
   role: FamilyRole
+  socialRoles?: string | null
   photoUri?: string | null
   maidenName?: string | null
   fatherId?: number | null

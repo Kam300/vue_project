@@ -26,6 +26,29 @@ function Write-Step {
     Write-Host "==> $Message" -ForegroundColor Yellow
 }
 
+function Normalize-Domain {
+    param([string]$Value)
+
+    $candidate = ''
+    if ($null -ne $Value) {
+        $candidate = [string]$Value
+    }
+    $candidate = $candidate.Trim()
+    if (-not $candidate) {
+        throw 'Domain is empty.'
+    }
+
+    $candidate = $candidate -replace '^\s*https?://', ''
+    $candidate = $candidate.TrimEnd('/')
+    $candidate = $candidate.Trim()
+
+    if (-not $candidate) {
+        throw 'Domain is empty after normalization.'
+    }
+
+    return $candidate
+}
+
 function Write-TextUtf8NoBom {
     param(
         [string]$Path,
@@ -246,6 +269,7 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 $runtimeDir = Join-Path $repoRoot '.runtime'
 $backendEnv = Join-Path $repoRoot 'backend\.env'
 $backendEnvExample = Join-Path $repoRoot 'backend\.env.example'
+$Domain = Normalize-Domain -Value $Domain
 
 if (-not (Test-Path $backendEnv) -and (Test-Path $backendEnvExample)) {
     Copy-Item -Path $backendEnvExample -Destination $backendEnv

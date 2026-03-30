@@ -2,6 +2,7 @@ export interface HealthResponse {
   status: string
   service: string
   face_recognition: boolean
+  face_recognition_error?: string
   pdf_generation: boolean
   backup: boolean
   members_count: number
@@ -31,6 +32,7 @@ export interface RegisterFaceResponse {
   success: boolean
   message?: string
   error?: string
+  details?: string
 }
 
 export interface RecognitionResult {
@@ -48,6 +50,7 @@ export interface RecognitionResult {
 export interface RecognizeFaceResponse {
   success: boolean
   error?: string
+  details?: string
   results?: RecognitionResult[]
   faces_count?: number
   recognized_count?: number
@@ -61,6 +64,7 @@ export interface ListFacesResponse {
     member_name: string
   }>
   error?: string
+  details?: string
 }
 
 export interface GeneratePdfResponse {

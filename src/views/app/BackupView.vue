@@ -320,13 +320,23 @@ async function restoreFromBlob(source: Blob, sourceLabel: string): Promise<void>
   try {
     const report = await restoreBackupArchive(source)
     await memberStore.refresh()
-    const faceReport = await syncProfileFaces(appStore.settings.deviceId)
+    let faceReport = { registered: 0, skipped: 0, failed: 0 }
+    let faceSyncError = ''
+    try {
+      faceReport = await syncProfileFaces(appStore.settings.deviceId)
+    } catch (reason) {
+      faceSyncError = (reason as Error).message || 'unknown sync error'
+    }
+
     await addBackupAudit(
       'backup_restore',
-      JSON.stringify({ source: sourceLabel, restore: report, faceSync: faceReport })
+      JSON.stringify({ source: sourceLabel, restore: report, faceSync: faceReport, faceSyncError })
     )
     await reloadAudit()
     status.value = `Восстановление завершено. Добавлено людей: ${report.membersInserted}, фото: ${report.photosAdded}, дубликатов: ${report.photosSkippedDuplicates}.`
+    if (faceSyncError) {
+      error.value = `Восстановление выполнено, но синхронизация лиц не завершена: ${faceSyncError}`
+    }
   } catch (reason) {
     error.value = `Ошибка восстановления: ${(reason as Error).message}`
   } finally {
@@ -398,12 +408,13 @@ async function removeRemoteBackup(): Promise<void> {
   <section class="app-page">
     <div class="app-container">
       <PageHeader
-        title="Backup"
-        subtitle="Локальный ZIP, серверный backup через Google OAuth и восстановление"
+        icon="cloud"
+        title="Резервные копии"
+        subtitle="Локальный ZIP, серверное резервирование через Google и восстановление"
       />
 
       <article class="app-card block">
-        <h2>Google OAuth</h2>
+        <h2>Авторизация Google</h2>
         <p class="status-line" v-if="!hasGoogleClientId">
           `VITE_GOOGLE_WEB_CLIENT_ID` не задан. Будет использован device auth режим.
         </p>
@@ -426,7 +437,7 @@ async function removeRemoteBackup(): Promise<void> {
             {{ buildBusy ? 'Подготовка...' : 'Собрать и скачать ZIP' }}
           </button>
           <button class="btn-action" @click="pickRestoreFile" :disabled="restoreBusy">
-            {{ restoreBusy ? 'Restore...' : 'Восстановить из ZIP' }}
+            {{ restoreBusy ? 'Восстановление...' : 'Восстановить из ZIP' }}
           </button>
         </div>
       </article>
@@ -447,18 +458,18 @@ async function removeRemoteBackup(): Promise<void> {
             {{ downloadBusy ? 'Скачивание...' : 'Скачать ZIP' }}
           </button>
           <button class="btn-action" @click="restoreFromRemote" :disabled="!canUseServerBackup || restoreBusy || downloadBusy">
-            {{ restoreBusy ? 'Синхронизация...' : 'Синхронизировать из backup' }}
+            {{ restoreBusy ? 'Синхронизация...' : 'Синхронизировать с сервера' }}
           </button>
           <button class="btn-action danger" @click="removeRemoteBackup" :disabled="!canUseServerBackup || deleteBusy">
-            {{ deleteBusy ? 'Удаление...' : 'Удалить backup' }}
+            {{ deleteBusy ? 'Удаление...' : 'Удалить резервную копию' }}
           </button>
         </div>
 
         <div class="meta-box" v-if="remoteMeta">
-          <div class="meta-row"><strong>Exists:</strong> {{ remoteMeta.exists ? 'Да' : 'Нет' }}</div>
+          <div class="meta-row"><strong>Наличие:</strong> {{ remoteMeta.exists ? 'Да' : 'Нет' }}</div>
           <div class="meta-row" v-if="remoteMeta.createdAtUtc"><strong>Создан:</strong> {{ remoteMeta.createdAtUtc }}</div>
-          <div class="meta-row" v-if="remoteMeta.updatedAtUtc"><strong>Обновлен:</strong> {{ remoteMeta.updatedAtUtc }}</div>
-          <div class="meta-row" v-if="remoteMeta.sizeBytes"><strong>Размер:</strong> {{ remoteMeta.sizeBytes }} bytes</div>
+          <div class="meta-row" v-if="remoteMeta.updatedAtUtc"><strong>Обновлён:</strong> {{ remoteMeta.updatedAtUtc }}</div>
+          <div class="meta-row" v-if="remoteMeta.sizeBytes"><strong>Размер:</strong> {{ remoteMeta.sizeBytes }} байт</div>
           <div class="meta-row" v-if="remoteMeta.membersCount !== undefined">
             <strong>Людей:</strong> {{ remoteMeta.membersCount }}
           </div>
@@ -466,13 +477,13 @@ async function removeRemoteBackup(): Promise<void> {
             <strong>Фото:</strong> {{ remoteMeta.memberPhotosCount }}
           </div>
           <div class="meta-row" v-if="remoteMeta.assetsCount !== undefined">
-            <strong>Assets:</strong> {{ remoteMeta.assetsCount }}
+            <strong>Файлов:</strong> {{ remoteMeta.assetsCount }}
           </div>
         </div>
       </article>
 
       <article class="app-card block">
-        <h2>Журнал backup</h2>
+        <h2>Журнал резервирования</h2>
         <div class="table-wrap">
           <table class="table">
             <thead>
@@ -515,24 +526,38 @@ async function removeRemoteBackup(): Promise<void> {
 
 <style scoped>
 .block {
-  padding: 16px;
+  padding: 20px;
 }
 
 .block + .block {
   margin-top: 14px;
 }
 
+.block h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
 .meta-box {
   margin-top: 14px;
-  border: 1px dashed var(--color-glass-border);
-  border-radius: 12px;
-  padding: 12px;
+  border: 1px solid var(--color-glass-border);
+  border-radius: var(--radius-md);
+  padding: 14px;
   display: grid;
-  gap: 6px;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .meta-row {
   font-size: 0.88rem;
+  display: flex;
+  gap: 8px;
+}
+
+.meta-row strong {
+  color: var(--color-text-secondary);
+  min-width: 100px;
 }
 
 .details {
@@ -546,8 +571,6 @@ async function removeRemoteBackup(): Promise<void> {
   color: var(--color-error);
 }
 </style>
-
-
 
 
 

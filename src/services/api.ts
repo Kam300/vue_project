@@ -31,10 +31,19 @@ async function parseResponse<T>(response: Response): Promise<T> {
   }
 
   if (!response.ok) {
-    const errorMessage =
-      typeof payload === 'object' && payload && 'error' in payload
-        ? String((payload as { error?: string }).error || '')
-        : `HTTP ${response.status}`
+    const errorMessage = (() => {
+      if (typeof payload === 'object' && payload) {
+        const error = 'error' in payload ? String((payload as { error?: string }).error || '') : ''
+        const details = 'details' in payload ? String((payload as { details?: string }).details || '') : ''
+        if (error && details && details !== error) {
+          return `${error}: ${details}`
+        }
+        if (error) {
+          return error
+        }
+      }
+      return `HTTP ${response.status}`
+    })()
     throw new Error(errorMessage || `HTTP ${response.status}`)
   }
 
@@ -79,6 +88,7 @@ export function registerFace(payload: {
 export function recognizeFace(payload: {
   image: string
   threshold?: number
+  device_id?: string | number
 }): Promise<RecognizeFaceResponse> {
   return request<RecognizeFaceResponse>('/recognize_face', 'POST', {
     body: JSON.stringify(payload),
@@ -90,8 +100,13 @@ export function deleteFace(memberId: string | number): Promise<RegisterFaceRespo
   return request<RegisterFaceResponse>(`/delete_face/${encodeURIComponent(String(memberId))}`, 'DELETE')
 }
 
-export function clearAllFaces(): Promise<RegisterFaceResponse> {
-  return request<RegisterFaceResponse>('/clear_all', 'DELETE')
+export function clearAllFaces(deviceId?: string | number): Promise<RegisterFaceResponse> {
+  const normalizedDeviceId =
+    deviceId !== undefined && deviceId !== null ? String(deviceId).trim() : ''
+  const endpoint = normalizedDeviceId
+    ? `/clear_all?device_id=${encodeURIComponent(normalizedDeviceId)}`
+    : '/clear_all'
+  return request<RegisterFaceResponse>(endpoint, 'DELETE')
 }
 
 export function generatePdf(payload: {

@@ -1,6 +1,7 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { reactive, ref } from 'vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
+import AppIcon from '@/components/shared/AppIcon.vue'
 import { useMemberStore } from '@/stores/memberStore'
 import { addBackupAudit } from '@/db/repositories'
 import { generatePdf, buildPdfDownloadUrl } from '@/services/api'
@@ -13,6 +14,8 @@ const importInput = ref<HTMLInputElement | null>(null)
 const importMode = ref<'merge' | 'replace'>('merge')
 const importing = ref(false)
 const pdfBusy = ref(false)
+const pdfProgress = ref(0)
+const dragOver = ref(false)
 const status = ref('')
 const error = ref('')
 
@@ -29,6 +32,24 @@ const pdfSettings = reactive({
 function clearMessages(): void {
   status.value = ''
   error.value = ''
+}
+
+// Fake progress ticker — плавно движется до ~90%, финальный скачок при завершении
+let _progressTimer: ReturnType<typeof setInterval> | null = null
+
+function startFakeProgress(): void {
+  pdfProgress.value = 0
+  _progressTimer = setInterval(() => {
+    if (pdfProgress.value < 88) {
+      pdfProgress.value += Math.random() * 4 + 1
+    }
+  }, 400)
+}
+
+function finishProgress(): void {
+  if (_progressTimer) { clearInterval(_progressTimer); _progressTimer = null }
+  pdfProgress.value = 100
+  setTimeout(() => { pdfProgress.value = 0 }, 800)
 }
 
 async function ensureMembers(): Promise<void> {
@@ -75,10 +96,10 @@ async function exportPdfFile(): Promise<void> {
   }
 
   pdfBusy.value = true
+  startFakeProgress()
   try {
     const membersForPdf = memberStore.members.map((member) => ({
       ...member,
-      // Backend draw_member_card ожидает photoBase64; в web профиле хранится photoUri (data URL).
       photoBase64: member.photoUri || ''
     }))
 
@@ -117,6 +138,7 @@ async function exportPdfFile(): Promise<void> {
   } catch (reason) {
     error.value = (reason as Error).message
   } finally {
+    finishProgress()
     pdfBusy.value = false
   }
 }
@@ -125,22 +147,19 @@ function openImportPicker(): void {
   importInput.value?.click()
 }
 
-async function onImportPicked(event: Event): Promise<void> {
+async function processImportFile(file: File): Promise<void> {
   clearMessages()
-  const target = event.target as HTMLInputElement
-  const file = target.files?.[0]
-  target.value = ''
-  if (!file) return
-
+  if (!file.name.endsWith('.json') && file.type !== 'application/json') {
+    error.value = 'Поддерживается только JSON файл.'
+    return
+  }
   importing.value = true
   try {
     const content = await file.text()
     const report = await importMembersFromJsonText(content, importMode.value)
     await memberStore.refresh()
-
     const action = importMode.value === 'replace' ? 'local_import_replace' : 'local_import_merge'
     await addBackupAudit(action, JSON.stringify(report))
-
     status.value = `Импорт завершен. Добавлено: ${report.inserted}, пропущено: ${report.skipped}, связей обновлено: ${report.relationsUpdated}.`
   } catch (reason) {
     error.value = `Ошибка импорта: ${(reason as Error).message}`
@@ -148,22 +167,68 @@ async function onImportPicked(event: Event): Promise<void> {
     importing.value = false
   }
 }
+
+async function onImportPicked(event: Event): Promise<void> {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  target.value = ''
+  if (!file) return
+  await processImportFile(file)
+}
+
+function onDragOver(e: DragEvent): void {
+  e.preventDefault()
+  dragOver.value = true
+}
+
+function onDragLeave(): void {
+  dragOver.value = false
+}
+
+async function onDrop(e: DragEvent): Promise<void> {
+  e.preventDefault()
+  dragOver.value = false
+  const file = e.dataTransfer?.files?.[0]
+  if (!file) return
+  await processImportFile(file)
+}
 </script>
 
 <template>
   <section class="app-page">
     <div class="app-container">
-      <PageHeader title="Экспорт и импорт" subtitle="JSON, CSV, PDF через backend и импорт с режимами Merge/Replace" />
+      <PageHeader
+        icon="import_export"
+        title="Экспорт и импорт"
+        subtitle="JSON, CSV, PDF через backend и импорт с режимами Merge/Replace"
+      />
 
+      <!-- Export section -->
       <article class="app-card block">
-        <h2>Экспорт</h2>
-        <div class="btn-row">
-          <button class="btn-action" @click="exportJsonFile">Экспорт JSON</button>
-          <button class="btn-action" @click="exportCsvFile">Экспорт CSV</button>
+        <h2 class="block-title with-icon">
+          <AppIcon name="upload_file" :size="20" />
+          Экспорт данных
+        </h2>
+        <div class="export-formats">
+          <button class="format-card" @click="exportJsonFile">
+            <AppIcon name="list_alt" :size="30" class="format-icon" />
+            <span class="format-name">JSON</span>
+            <small>Полные данные</small>
+          </button>
+          <button class="format-card" @click="exportCsvFile">
+            <AppIcon name="bar_chart" :size="30" class="format-icon" />
+            <span class="format-name">CSV</span>
+            <small>Таблица</small>
+          </button>
         </div>
 
+        <div class="section-divider"></div>
+
         <div class="pdf-box">
-          <h3>PDF через backend</h3>
+          <h3 class="with-icon">
+            <AppIcon name="description" :size="19" />
+            PDF через backend
+          </h3>
           <div class="form-grid">
             <div class="field">
               <label>Формат</label>
@@ -174,13 +239,12 @@ async function onImportPicked(event: Event): Promise<void> {
                 <option value="A3">A3 Portrait</option>
               </select>
             </div>
-
             <div class="field">
               <label>Качество фото</label>
               <select v-model="pdfSettings.photo_quality">
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
               </select>
             </div>
 
@@ -190,37 +254,93 @@ async function onImportPicked(event: Event): Promise<void> {
             </div>
           </div>
 
-          <div class="btn-row check-row">
-            <label class="switch"><input v-model="pdfSettings.use_drive" type="checkbox" /> Google Drive</label>
-            <label class="switch"><input v-model="pdfSettings.show_photos" type="checkbox" /> Фото</label>
-            <label class="switch"><input v-model="pdfSettings.show_dates" type="checkbox" /> Даты</label>
-            <label class="switch"
-              ><input v-model="pdfSettings.show_patronymic" type="checkbox" /> Отчество</label
-            >
+          <div class="toggle-row">
+            <label class="toggle-switch">
+              <input v-model="pdfSettings.use_drive" type="checkbox" />
+              <span class="toggle-track"></span>
+              <span>Google Drive</span>
+            </label>
+            <label class="toggle-switch">
+              <input v-model="pdfSettings.show_photos" type="checkbox" />
+              <span class="toggle-track"></span>
+              <span>Фото</span>
+            </label>
+            <label class="toggle-switch">
+              <input v-model="pdfSettings.show_dates" type="checkbox" />
+              <span class="toggle-track"></span>
+              <span>Даты</span>
+            </label>
+            <label class="toggle-switch">
+              <input v-model="pdfSettings.show_patronymic" type="checkbox" />
+              <span class="toggle-track"></span>
+              <span>Отчество</span>
+            </label>
           </div>
 
           <div class="btn-row">
             <button class="btn-action primary" :disabled="pdfBusy" @click="exportPdfFile">
+              <AppIcon :name="pdfBusy ? 'hourglass_top' : 'description'" :size="18" />
               {{ pdfBusy ? 'Генерация PDF...' : 'Экспорт PDF' }}
             </button>
           </div>
+
+          <Transition name="fade-progress">
+            <div v-if="pdfBusy || pdfProgress > 0" class="pdf-progress-wrap">
+              <div class="progress-bar">
+                <div
+                  class="progress-bar-fill"
+                  :class="{ 'progress-pulse': pdfBusy && pdfProgress < 95 }"
+                  :style="{ width: Math.min(pdfProgress, 100) + '%' }"
+                />
+              </div>
+              <span class="pdf-progress-label">
+                {{ pdfProgress >= 100 ? 'Готово!' : `${Math.round(pdfProgress)}%` }}
+              </span>
+            </div>
+          </Transition>
         </div>
       </article>
 
+      <!-- Import section -->
       <article class="app-card block">
-        <h2>Импорт JSON</h2>
-        <div class="field mode-field">
-          <label>Режим импорта</label>
-          <select v-model="importMode">
-            <option value="merge">Merge (по умолчанию)</option>
-            <option value="replace">Replace (полная замена)</option>
-          </select>
+        <h2 class="block-title with-icon">
+          <AppIcon name="download" :size="20" />
+          Импорт JSON
+        </h2>
+
+        <div class="import-row">
+          <div class="field mode-field">
+            <label>Режим импорта</label>
+            <select v-model="importMode">
+              <option value="merge">Merge (по умолчанию)</option>
+              <option value="replace">Replace (полная замена)</option>
+            </select>
+          </div>
         </div>
-        <div class="btn-row">
-          <button class="btn-action" :disabled="importing" @click="openImportPicker">
-            {{ importing ? 'Импорт...' : 'Выбрать JSON файл' }}
-          </button>
+
+        <div
+          class="drop-zone"
+          :class="{ active: dragOver || importing }"
+          @dragover="onDragOver"
+          @dragleave="onDragLeave"
+          @drop="onDrop"
+          @click="openImportPicker"
+        >
+          <AppIcon
+            :name="importing ? 'hourglass_top' : 'upload_file'"
+            :size="40"
+            class="drop-zone-icon"
+            :class="{ 'spin-slow': importing }"
+          />
+          <p class="drop-zone-label">
+            <template v-if="importing">Импорт...</template>
+            <template v-else>
+              Перетащите JSON файл сюда
+              <span class="drop-zone-or">или нажмите для выбора</span>
+            </template>
+          </p>
         </div>
+
         <input
           ref="importInput"
           type="file"
@@ -230,9 +350,16 @@ async function onImportPicked(event: Event): Promise<void> {
         />
       </article>
 
+      <!-- Status -->
       <article class="app-card block" v-if="status || error">
-        <p v-if="status" class="status-line">{{ status }}</p>
-        <p v-if="error" class="error">{{ error }}</p>
+        <p v-if="status" class="status-success with-icon">
+          <AppIcon name="check_circle" :size="18" />
+          {{ status }}
+        </p>
+        <p v-if="error" class="error-msg with-icon">
+          <AppIcon name="error" :size="18" />
+          {{ error }}
+        </p>
       </article>
     </div>
   </section>
@@ -240,53 +367,170 @@ async function onImportPicked(event: Event): Promise<void> {
 
 <style scoped>
 .block {
-  padding: 16px;
+  padding: 20px;
 }
 
 .block + .block {
   margin-top: 14px;
 }
 
-h2 {
-  margin-bottom: 12px;
+.block-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 16px;
 }
 
-.pdf-box {
-  margin-top: 14px;
-  border: 1px dashed var(--color-glass-border);
-  border-radius: 12px;
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.pdf-box h3 {
-  font-size: 0.95rem;
-}
-
-.check-row {
-  gap: 14px;
-}
-
-.switch {
+.with-icon {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 0.86rem;
-  color: var(--color-text-secondary);
+}
+
+/* Format cards */
+.export-formats {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.format-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 20px 28px;
+  border: 1px solid var(--color-glass-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+  font-family: var(--font-sans);
+  min-width: 120px;
+}
+
+.format-card:hover {
+  border-color: rgba(124, 92, 252, 0.4);
+  background: rgba(124, 92, 252, 0.06);
+  transform: translateY(-3px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.format-icon {
+  font-size: 2rem;
+}
+
+.format-name {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.format-card small {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+/* PDF box */
+.pdf-box {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pdf-box h3 {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
 }
 
 .full-width {
   grid-column: 1 / -1;
 }
 
-.mode-field {
-  max-width: 360px;
-  margin-bottom: 12px;
+/* Import row */
+.import-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
-.error {
+.mode-field {
+  max-width: 360px;
+  flex: 1;
+}
+
+.status-success {
+  color: var(--color-success);
+  font-size: 0.9rem;
+}
+
+.error-msg {
   color: var(--color-error);
+  font-size: 0.9rem;
+}
+
+/* PDF progress */
+.pdf-progress-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.pdf-progress-label {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  min-width: 36px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+@keyframes progress-pulse-anim {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.progress-pulse {
+  animation: progress-pulse-anim 1.2s ease-in-out infinite;
+}
+
+.fade-progress-enter-active,
+.fade-progress-leave-active {
+  transition: opacity 0.3s;
+}
+.fade-progress-enter-from,
+.fade-progress-leave-to {
+  opacity: 0;
+}
+
+/* Drop zone customization */
+.drop-zone-label {
+  margin: 0;
+  font-size: 0.95rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.drop-zone-or {
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+@keyframes spin-slow-anim {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.spin-slow {
+  animation: spin-slow-anim 1.8s linear infinite;
+  display: inline-block;
 }
 </style>

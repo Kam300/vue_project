@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import logoIcon from '@/assets/icon.png'
+import AppIcon from '@/components/shared/AppIcon.vue'
 
 const apiStatus = ref(null)
 const apiLatency = ref(null)
@@ -12,6 +13,28 @@ const maxLogs = 40
 let pollTimer = null
 let checkCount = ref(0)
 const shownEventKeys = new Set()
+const LOG_ICON_ALIASES = {
+  '\u{1F4E1}': 'rss_feed',
+  '\u2705': 'check_circle',
+  '\u{1F9E0}': 'psychology',
+  '\u{1F4C4}': 'description',
+  '\u{1F465}': 'groups',
+  '\u{1F514}': 'notifications',
+  '\u26A0\uFE0F': 'warning',
+  '\u274C': 'error',
+  '\u{1F50D}': 'search',
+  '\u{1F4CB}': 'list_alt',
+  '\u{1F464}': 'person',
+  '\u2795': 'add',
+  '\u{1F680}': 'rocket_launch'
+}
+
+function normalizeLogIcon(rawIcon) {
+  if (!rawIcon) return 'notifications'
+  if (LOG_ICON_ALIASES[rawIcon]) return LOG_ICON_ALIASES[rawIcon]
+  if (/^[a-z0-9_]+$/i.test(rawIcon)) return rawIcon
+  return 'notifications'
+}
 
 function addLog(icon, message, type = 'info') {
   const now = new Date()
@@ -23,7 +46,7 @@ function addLog(icon, message, type = 'info') {
 async function checkHealth() {
   const start = performance.now()
   checkCount.value++
-  addLog('📡', 'Отправляем запрос на проверку сервера...', 'sending')
+  addLog('rss_feed', 'Отправляем запрос на проверку сервера...', 'sending')
   try {
     const res = await fetch('/api/health')
     const elapsed = Math.round(performance.now() - start)
@@ -34,14 +57,14 @@ async function checkHealth() {
       memberCount.value = data.members_count || 0
       faceRecOk.value = data.face_recognition
       pdfGenOk.value = data.pdf_generation
-      addLog('✅', `Сервер работает! Время ответа: ${elapsed}мс`, 'success')
+      addLog('check_circle', `Сервер работает! Время ответа: ${elapsed}мс`, 'success')
       if (data.face_recognition) {
-        addLog('🧠', 'Модуль распознавания лиц — активен', 'success')
+        addLog('psychology', 'Модуль распознавания лиц — активен', 'success')
       }
       if (data.pdf_generation) {
-        addLog('📄', 'Модуль генерации PDF — активен', 'success')
+        addLog('description', 'Модуль генерации PDF — активен', 'success')
       }
-      addLog('👥', `Зарегистрировано лиц в базе: ${data.members_count}`, 'info')
+      addLog('groups', `Зарегистрировано лиц в базе: ${data.members_count}`, 'info')
 
       // Отображаем серверные события (PDF генерация и т.д.)
       if (data.recent_events && data.recent_events.length > 0) {
@@ -49,52 +72,52 @@ async function checkHealth() {
           const key = `${ev.ts}_${ev.message}`
           if (!shownEventKeys.has(key)) {
             shownEventKeys.add(key)
-            addLog(ev.icon || '🔔', ev.message, ev.type || 'info')
+            addLog(normalizeLogIcon(ev.icon || 'notifications'), ev.message, ev.type || 'info')
           }
         })
       }
     } else {
       apiStatus.value = 'error'
-      addLog('⚠️', `Сервер ответил с ошибкой (код ${res.status}). Время: ${elapsed}мс`, 'error')
+      addLog('warning', `Сервер ответил с ошибкой (код ${res.status}). Время: ${elapsed}мс`, 'error')
     }
   } catch (e) {
     apiStatus.value = 'offline'
-    addLog('❌', 'Не удалось подключиться к серверу — проверьте, запущен ли он', 'error')
+    addLog('error', 'Не удалось подключиться к серверу — проверьте, запущен ли он', 'error')
   }
 }
 
 async function testListFaces() {
   const start = performance.now()
-  addLog('🔍', 'Запрашиваем список зарегистрированных лиц...', 'sending')
+  addLog('search', 'Запрашиваем список зарегистрированных лиц...', 'sending')
   try {
     const res = await fetch('/api/list_faces')
     const elapsed = Math.round(performance.now() - start)
     if (res.ok) {
       const data = await res.json()
       const count = data.count || 0
-      addLog('✅', `Получен ответ за ${elapsed}мс`, 'success')
+      addLog('check_circle', `Получен ответ за ${elapsed}мс`, 'success')
       if (count === 0) {
-        addLog('📋', 'В базе пока нет зарегистрированных лиц', 'info')
+        addLog('list_alt', 'В базе пока нет зарегистрированных лиц', 'info')
       } else {
-        addLog('📋', `Найдено лиц: ${count}`, 'info')
+        addLog('list_alt', `Найдено лиц: ${count}`, 'info')
         const faces = data.faces || []
         faces.slice(0, 5).forEach(f => {
-          addLog('👤', `${f.member_name} (ID: ${f.member_id})`, 'info')
+          addLog('person', `${f.member_name} (ID: ${f.member_id})`, 'info')
         })
         if (faces.length > 5) {
-          addLog('➕', `... и ещё ${faces.length - 5}`, 'info')
+          addLog('add', `... и ещё ${faces.length - 5}`, 'info')
         }
       }
     } else {
-      addLog('⚠️', `Ошибка при получении списка (код ${res.status})`, 'error')
+      addLog('warning', `Ошибка при получении списка (код ${res.status})`, 'error')
     }
   } catch (e) {
-    addLog('❌', 'Не удалось получить список — сервер недоступен', 'error')
+    addLog('error', 'Не удалось получить список — сервер недоступен', 'error')
   }
 }
 
 onMounted(() => {
-  addLog('🚀', 'Страница загружена — начинаем мониторинг сервера', 'info')
+  addLog('rocket_launch', 'Страница загружена — начинаем мониторинг сервера', 'info')
   checkHealth()
   pollTimer = setInterval(checkHealth, 15000)
 })
@@ -105,9 +128,9 @@ onUnmounted(() => {
 
 const features = [
   { icon: 'face', title: 'Распознавание лиц', desc: 'Технология face_recognition идентифицирует членов семьи на фотографиях с точностью до 98%.' },
-  { icon: 'pdf', title: 'Генерация PDF', desc: 'Красивое семейное древо в формате PDF с помощью ReportLab — готово к печати.' },
+  { icon: 'pdf', title: 'Генерация документов', desc: 'Красивое семейное древо в формате PDF с помощью ReportLab — готово к печати.' },
   { icon: 'tree', title: 'Семейные связи', desc: 'Визуализация поколений, связей и родственных отношений в удобном интерфейсе.' },
-  { icon: 'cloud', title: 'Облачный сервер', desc: 'API сервер с Cloudflare Tunnel обеспечивает доступ из любой точки мира.' },
+  { icon: 'cloud', title: 'Облачный сервер', desc: 'АПИ-сервер с Cloudflare Tunnel обеспечивает доступ из любой точки мира.' },
 ]
 
 const steps = [
@@ -126,6 +149,7 @@ const techStack = [
   { name: 'Caddy Server', color: '#22d3ee' },
   { name: 'OkHttp', color: '#a78bfa' },
 ]
+const androidApkUrl = '/app-debug.apk'
 </script>
 
 <template>
@@ -157,7 +181,10 @@ const techStack = [
     <section class="hero">
       <div class="container hero-inner">
         <div class="hero-content animate-in delay-1">
-          <span class="hero-badge">🎓 Дипломный проект 2026</span>
+          <span class="hero-badge">
+            <AppIcon name="school" :size="16" />
+            Дипломный проект 2026
+          </span>
           <h1 class="hero-title">
             <span class="title-line">Семейное</span>
             <span class="title-accent">Древо</span>
@@ -173,7 +200,7 @@ const techStack = [
           </div>
           <div class="hero-stats">
             <div class="stat">
-              <span class="stat-value">AI</span>
+              <span class="stat-value">ИИ</span>
               <span class="stat-label">Распознавание лиц</span>
             </div>
             <div class="stat-divider"></div>
@@ -271,6 +298,17 @@ const techStack = [
             {{ t.name }}
           </span>
         </div>
+        <article class="project-apk-note animate-in delay-3">
+          <h3 class="project-apk-title">
+            <AppIcon name="android" :size="20" />
+            В разделе «О проекте» доступно Android-приложение
+          </h3>
+          <p class="project-apk-text">Сборку можно скачать напрямую с сайта.</p>
+          <a class="btn btn-outline project-apk-link" :href="androidApkUrl" download="app-debug.apk">
+            <AppIcon name="download" :size="18" />
+            Скачать app-debug.apk
+          </a>
+        </article>
       </div>
     </section>
 
@@ -334,12 +372,14 @@ const techStack = [
               <TransitionGroup name="log-item">
                 <div v-for="log in logs" :key="log.id" class="log-entry" :class="'log-' + log.type">
                   <span class="log-time">{{ log.ts }}</span>
-                  <span class="log-icon">{{ log.icon }}</span>
+                  <span class="log-icon">
+                    <AppIcon :name="normalizeLogIcon(log.icon)" :size="16" />
+                  </span>
                   <span class="log-msg">{{ log.message }}</span>
                 </div>
               </TransitionGroup>
               <div v-if="logs.length === 0" class="log-empty">
-                ⏳ Ожидание событий...
+                Ожидание событий...
               </div>
             </div>
           </div>
@@ -377,19 +417,19 @@ const techStack = [
 }
 .orb-1 {
   width: 600px; height: 600px;
-  background: rgba(124, 92, 252, 0.12);
+  background: var(--orb1-color);
   top: -200px; left: -100px;
   animation: float 20s ease-in-out infinite;
 }
 .orb-2 {
   width: 500px; height: 500px;
-  background: rgba(244, 114, 182, 0.08);
+  background: var(--orb2-color);
   bottom: -150px; right: -100px;
   animation: float 25s ease-in-out infinite reverse;
 }
 .orb-3 {
   width: 300px; height: 300px;
-  background: rgba(34, 211, 238, 0.06);
+  background: var(--orb3-color);
   top: 50%; left: 50%;
   animation: float 18s ease-in-out infinite 3s;
 }
@@ -397,7 +437,7 @@ const techStack = [
 /* ---- NAV ---- */
 .navbar {
   position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-  background: rgba(11, 14, 23, 0.7);
+  background: color-mix(in srgb, var(--color-bg-alt) 75%, transparent);
   backdrop-filter: blur(20px);
   border-bottom: 1px solid var(--color-glass-border);
 }
@@ -430,7 +470,9 @@ const techStack = [
   display: grid; grid-template-columns: 1fr 1fr; gap: 60px; align-items: center;
 }
 .hero-badge {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 6px 16px; border-radius: 999px;
   background: var(--color-glass);
   border: 1px solid var(--color-glass-border);
@@ -506,7 +548,7 @@ const techStack = [
 }
 .phone-screen {
   height: 100%; border-radius: 20px;
-  background: rgba(255,255,255,0.03);
+  background: var(--color-glass);
   padding: 20px 16px;
   display: flex; flex-direction: column; gap: 20px;
   overflow: hidden;
@@ -640,6 +682,36 @@ const techStack = [
 }
 .badge-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 
+.project-apk-note {
+  margin: 26px auto 0;
+  max-width: 760px;
+  text-align: center;
+  background: var(--color-glass);
+  border: 1px solid var(--color-glass-border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+}
+
+.project-apk-title {
+  margin: 0 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.project-apk-text {
+  margin: 0 0 14px;
+  color: var(--color-text-secondary);
+}
+
+.project-apk-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* ---- LOGS ---- */
 .api-panel {
   background: var(--color-bg-alt);
@@ -756,7 +828,12 @@ const techStack = [
   font-size: 0.78rem;
   font-variant-numeric: tabular-nums;
 }
-.log-icon { flex-shrink: 0; font-size: 0.9rem; }
+.log-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 .log-msg { color: var(--color-text-secondary); }
 .log-entry.log-success .log-msg { color: var(--color-success); }
 .log-entry.log-error .log-msg { color: var(--color-error); }
@@ -792,19 +869,83 @@ const techStack = [
 @media (max-width: 1024px) {
   .features-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
 @media (max-width: 768px) {
   .nav-links { display: none; }
-  .hero-inner { grid-template-columns: 1fr; text-align: center; }
-  .hero-title { font-size: 2.8rem; }
-  .hero-subtitle { margin: 0 auto 24px; }
-  .hero-actions { justify-content: center; }
+
+  /* Hero */
+  .hero {
+    min-height: auto;
+    padding: 88px 0 48px;
+  }
+  .hero-inner { grid-template-columns: 1fr; text-align: center; gap: 32px; }
+  .hero-visual { display: none; } /* макет телефона скрыт на реальном телефоне */
+  .hero-title { font-size: 2.6rem; }
+  .hero-subtitle { margin: 0 auto 24px; max-width: 480px; }
+  .hero-actions {
+    justify-content: center;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+  .hero-actions .btn { width: 100%; max-width: 320px; min-height: 48px; }
   .hero-stats { justify-content: center; }
-  .hero-visual { margin-top: 20px; }
-  .phone-mockup { width: 200px; height: 360px; }
-  .features-grid { grid-template-columns: 1fr; }
-  .steps-row { grid-template-columns: 1fr; }
-  .api-status-bar { flex-direction: column; gap: 12px; align-items: flex-start; }
-  .footer-inner { flex-direction: column; gap: 12px; text-align: center; }
+  .hero-badge { margin-bottom: 14px; }
+
+  /* Sections */
+  .section { padding: 60px 0; }
   .section-title { font-size: 2rem; }
+  .features-grid { grid-template-columns: 1fr; }
+  .steps-row { grid-template-columns: 1fr; gap: 16px; }
+
+  /* API panel */
+  .api-status-bar { flex-direction: column; gap: 12px; align-items: flex-start; }
+
+  /* Footer */
+  .footer-inner { flex-direction: column; gap: 12px; text-align: center; }
+}
+
+@media (max-width: 640px) {
+  .hero-title { font-size: 2.2rem; }
+
+  /* API panel inner padding */
+  .api-status-bar { padding: 14px 16px; }
+  .api-actions { flex-wrap: wrap; padding: 10px 16px; gap: 8px; }
+  .action-btn { flex: 1 1 calc(50% - 4px); justify-content: center; min-height: 40px; }
+  .api-caps { padding: 10px 16px; flex-wrap: wrap; gap: 10px; }
+  .log-header { padding: 10px 16px; }
+  .log-entry { padding: 6px 16px; }
+  .log-empty { padding: 20px 16px; }
+
+  /* Section */
+  .section-title { font-size: 1.8rem; }
+  .section-subtitle { font-size: 0.95rem; }
+
+  /* Tech badges */
+  .tech-badges { gap: 8px; }
+  .tech-badge { padding: 8px 14px; font-size: 0.82rem; }
+
+  /* Step cards */
+  .step-card { padding: 28px 20px; }
+  .feature-card { padding: 24px 18px; }
+}
+
+@media (max-width: 480px) {
+  .hero { padding: 80px 0 36px; }
+  .hero-title { font-size: 1.9rem; line-height: 1.15; }
+  .hero-badge { font-size: 0.74rem; padding: 5px 12px; }
+  .hero-subtitle { font-size: 0.95rem; }
+  .hero-actions .btn { font-size: 0.88rem; }
+
+  .section { padding: 48px 0; }
+  .section-title { font-size: 1.6rem; }
+
+  .step-card { padding: 22px 16px; }
+  .step-num { font-size: 2rem; }
+  .feature-card { padding: 20px 16px; }
+
+  .footer { padding: 28px 0; }
+  .footer-copy { font-size: 0.76rem; }
 }
 </style>
+

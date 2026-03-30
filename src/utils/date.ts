@@ -54,3 +54,37 @@ export function formatDateForHuman(value: string): string {
 export function nowIso(): string {
   return new Date().toISOString()
 }
+
+/**
+ * Вычисляет полных лет по дате в формате DD.MM.YYYY.
+ * Возвращает строку вида "(42 года)" или null если дата некорректна.
+ */
+export function calcAge(displayDate: string): string | null {
+  const match = displayDate.trim().match(DISPLAY_DATE_PATTERN)
+  if (!match) return null
+  const [, dayStr, monthStr, yearStr] = match
+  const birth = new Date(Number(yearStr), Number(monthStr) - 1, Number(dayStr))
+  if (Number.isNaN(birth.getTime())) return null
+  const now = new Date()
+  let age = now.getFullYear() - birth.getFullYear()
+  const notYetHadBirthday =
+    now.getMonth() < birth.getMonth() ||
+    (now.getMonth() === birth.getMonth() && now.getDate() < birth.getDate())
+  if (notYetHadBirthday) age -= 1
+  if (age < 0 || age > 150) return null
+
+  // Русское склонение
+  const mod10 = age % 10
+  const mod100 = age % 100
+  let suffix: string
+  if (mod100 >= 11 && mod100 <= 14) {
+    suffix = 'лет'
+  } else if (mod10 === 1) {
+    suffix = 'год'
+  } else if (mod10 >= 2 && mod10 <= 4) {
+    suffix = 'года'
+  } else {
+    suffix = 'лет'
+  }
+  return `(${age}\u00a0${suffix})`
+}

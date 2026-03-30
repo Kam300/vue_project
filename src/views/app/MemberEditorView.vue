@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import MemberForm from '@/components/forms/MemberForm.vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
+import AppIcon from '@/components/shared/AppIcon.vue'
 import { useMemberStore } from '@/stores/memberStore'
 import { useAppStore } from '@/stores/appStore'
 import type { FamilyMember } from '@/types/models'
@@ -17,6 +18,7 @@ const appStore = useAppStore()
 
 const busy = ref(false)
 const savingNote = ref('')
+const savingNoteType = ref<'success' | 'warning' | ''>('')
 const addPhotoInput = ref<HTMLInputElement | null>(null)
 
 const memberId = computed(() => Number(route.params.id || 0) || 0)
@@ -42,26 +44,35 @@ onMounted(async () => {
 async function saveMember(payload: FamilyMember): Promise<void> {
   busy.value = true
   savingNote.value = ''
+  savingNoteType.value = ''
   try {
     const savedId = await memberStore.saveMember(payload)
     if (payload.photoUri) {
       try {
         const imagePayload = await ensureFaceApiPayload(payload.photoUri)
-        const serverId = toServerMemberId(appStore.settings.deviceId, savedId)
+        const serverId = toServerMemberId(appStore.settings.deviceId, {
+          ...payload
+        })
         const result = await registerFace({
-          member_id: String(serverId),
+          member_id: serverId,
           member_name: `${payload.firstName} ${payload.lastName}`.trim(),
           image: imagePayload
         })
-        savingNote.value = result.success
-          ? 'Профиль сохранен, лицо зарегистрировано в AI.'
-          : `Профиль сохранен, но AI регистрация не выполнена: ${result.error || 'ошибка'}`
+        if (result.success) {
+          savingNoteType.value = 'success'
+          savingNote.value = 'Профиль сохранен, лицо зарегистрировано в AI.'
+        } else {
+          savingNoteType.value = 'warning'
+          savingNote.value = `Профиль сохранен, но AI регистрация не выполнена: ${result.error || 'ошибка'}`
+        }
       } catch (error) {
+        savingNoteType.value = 'warning'
         savingNote.value = `Профиль сохранен, но AI регистрация завершилась ошибкой: ${
           (error as Error).message
         }`
       }
     } else {
+      savingNoteType.value = 'success'
       savingNote.value = 'Профиль сохранен.'
     }
 
@@ -107,9 +118,25 @@ async function deleteCurrentMember(): Promise<void> {
   <section class="app-page">
     <div class="app-container">
       <PageHeader
+        :icon="isCreateMode ? 'person_add' : 'edit'"
         :title="isCreateMode ? 'Новый член семьи' : 'Профиль и редактирование'"
         subtitle="Поля, семейные связи, фото профиля и галерея"
       />
+
+      <!-- Profile preview for existing member -->
+      <div v-if="!isCreateMode && currentMember" class="profile-preview">
+        <div class="preview-avatar-wrap">
+          <img v-if="currentMember.photoUri" :src="currentMember.photoUri" class="preview-avatar" />
+          <div v-else class="preview-avatar placeholder">
+            <AppIcon name="person" :size="28" />
+          </div>
+        </div>
+        <div class="preview-info">
+          <h2>{{ currentMember.firstName }} {{ currentMember.lastName }}</h2>
+          <p v-if="currentMember.patronymic">{{ currentMember.patronymic }}</p>
+          <p v-if="currentMember.socialRoles" class="tradition-line">{{ currentMember.socialRoles }}</p>
+        </div>
+      </div>
 
       <MemberForm
         :model-value="currentMember"
@@ -120,25 +147,49 @@ async function deleteCurrentMember(): Promise<void> {
         @cancel="router.push('/app/members')"
       />
 
+      <!-- Saving note -->
+      <div v-if="savingNote" class="save-note" :class="{ success: savingNoteType === 'success', warning: savingNoteType === 'warning' }">
+        {{ savingNote }}
+      </div>
+
+      <!-- Gallery section -->
       <article class="app-card gallery-card" v-if="!isCreateMode && currentMember?.id">
         <div class="gallery-head">
-          <h2>Галерея фото</h2>
+          <h2 class="with-icon">
+            <AppIcon name="photo_library" :size="20" />
+            Галерея фото
+          </h2>
           <div class="btn-row">
-            <button class="btn-action" @click="openAddPhoto">Добавить фото в галерею</button>
-            <button class="btn-action danger" @click="deleteCurrentMember">Удалить профиль</button>
+            <button class="btn-action" @click="openAddPhoto">
+              <AppIcon name="add" :size="16" />
+              Добавить фото
+            </button>
+            <button class="btn-action danger" @click="deleteCurrentMember">
+              <AppIcon name="delete" :size="16" />
+              Удалить профиль
+            </button>
           </div>
         </div>
-        <div class="status-line" v-if="savingNote">{{ savingNote }}</div>
-        <div class="empty-state" v-if="!memberPhotos.length">Фото галереи пока отсутствуют.</div>
+
+        <div class="empty-state" v-if="!memberPhotos.length">
+          <span class="empty-state-icon">
+            <AppIcon name="photo_camera" :size="32" />
+          </span>
+          <p>Фото галереи пока отсутствуют.</p>
+        </div>
+
         <div v-else class="gallery-grid">
           <figure v-for="photo in memberPhotos" :key="photo.id" class="gallery-item">
             <img :src="photo.photoUri" alt="Фото члена семьи" />
             <figcaption>
               <span>{{ new Date(photo.dateAdded).toLocaleString('ru-RU') }}</span>
-              <button class="btn-action danger" @click="deletePhoto(photo.id)">Удалить</button>
+              <button class="btn-action danger" @click="deletePhoto(photo.id)">
+                <AppIcon name="close" :size="16" />
+              </button>
             </figcaption>
           </figure>
         </div>
+
         <input
           ref="addPhotoInput"
           type="file"
@@ -152,9 +203,72 @@ async function deleteCurrentMember(): Promise<void> {
 </template>
 
 <style scoped>
+.profile-preview {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+  padding: 16px;
+  background: var(--color-glass);
+  border: 1px solid var(--color-glass-border);
+  border-radius: var(--radius-lg);
+}
+
+.preview-avatar-wrap {
+  flex-shrink: 0;
+}
+
+.preview-avatar {
+  width: 72px;
+  height: 72px;
+  border-radius: 16px;
+  object-fit: cover;
+  border: 2px solid rgba(124, 92, 252, 0.3);
+  box-shadow: 0 0 20px rgba(124, 92, 252, 0.15);
+}
+
+.preview-avatar.placeholder {
+  display: grid;
+  place-items: center;
+  background: var(--color-surface);
+  font-size: 2rem;
+}
+
+.preview-info h2 {
+  font-size: 1.3rem;
+  font-weight: 700;
+}
+
+.preview-info p {
+  color: var(--color-text-secondary);
+}
+
+.tradition-line {
+  color: var(--color-accent-light);
+}
+
+.save-note {
+  margin-top: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 0.9rem;
+  border: 1px solid var(--color-glass-border);
+  animation: fadeInUp 0.3s ease-out;
+}
+
+.save-note.success {
+  border-color: rgba(52, 211, 153, 0.3);
+  background: rgba(52, 211, 153, 0.06);
+}
+
+.save-note.warning {
+  border-color: rgba(251, 191, 36, 0.3);
+  background: rgba(251, 191, 36, 0.06);
+}
+
 .gallery-card {
   margin-top: 16px;
-  padding: 16px;
+  padding: 20px;
 }
 
 .gallery-head {
@@ -163,7 +277,17 @@ async function deleteCurrentMember(): Promise<void> {
   gap: 10px;
   align-items: center;
   flex-wrap: wrap;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
+}
+
+.gallery-head h2 {
+  font-size: 1.1rem;
+}
+
+.with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .gallery-grid {
@@ -174,9 +298,16 @@ async function deleteCurrentMember(): Promise<void> {
 
 .gallery-item {
   border: 1px solid var(--color-glass-border);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--input-bg);
+  transition: all var(--transition-normal);
+}
+
+.gallery-item:hover {
+  border-color: rgba(124, 92, 252, 0.3);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
 }
 
 .gallery-item img {
@@ -190,7 +321,8 @@ async function deleteCurrentMember(): Promise<void> {
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  padding: 8px;
-  font-size: 0.78rem;
+  padding: 8px 10px;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
 }
 </style>

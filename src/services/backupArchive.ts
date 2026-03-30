@@ -32,6 +32,7 @@ interface BackupMemberRecord {
   gender: FamilyMember['gender']
   birthDate: string
   role: FamilyMember['role']
+  socialRoles: string
   phoneNumber: string
   maidenName: string
   weddingDate: string
@@ -144,6 +145,7 @@ export async function createBackupArchive(
         gender: member.gender,
         birthDate: normalizeDateToDisplayFormat(member.birthDate),
         role: member.role,
+        socialRoles: member.socialRoles || '',
         phoneNumber: member.phoneNumber || '',
         maidenName: member.maidenName || '',
         weddingDate: member.weddingDate || '',
@@ -246,6 +248,7 @@ export async function restoreBackupArchive(file: Blob): Promise<BackupRestoreRep
         gender: record.gender || 'MALE',
         birthDate: normalizeDateToDisplayFormat(record.birthDate),
         role: record.role || 'OTHER',
+        socialRoles: record.socialRoles || null,
         phoneNumber: record.phoneNumber || null,
         fatherId: null,
         motherId: null,
