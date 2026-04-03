@@ -2769,7 +2769,7 @@ def draw_header(c, width, height, title='Семейное Древо'):
     # Подзаголовок
     c.setFont(FONT_REGULAR, 10)
     c.setFillColorRGB(0.5, 0.4, 0.3)
-    c.drawCentredString(width / 2, banner_y + 5, "~ FamilyOne ~")
+    c.drawCentredString(width / 2, banner_y + 5, "~ Семейное древо ~")
 
     # Декоративная линия под заголовком
     c.setStrokeColorRGB(0.6, 0.5, 0.3)

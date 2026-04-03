@@ -79,7 +79,7 @@ export const useAppStore = defineStore('app', () => {
     writeSessionValue(SESSION_STORAGE_KEYS.lockUnlocked, sessionUnlocked.value ? '1' : '')
   }
 
-  async function refreshAuthState(displayName = 'FamilyOne Web'): Promise<AuthBootstrapResponse | null> {
+  async function refreshAuthState(displayName = 'Веб-клиент Семейного древа'): Promise<AuthBootstrapResponse | null> {
     const deviceId = String(settings.value.deviceId || '').trim()
     if (!deviceId) {
       authProviders.value = null

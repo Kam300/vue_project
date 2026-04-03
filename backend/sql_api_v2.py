@@ -64,7 +64,7 @@ def _request_device_id() -> str:
     return str(request.args.get('device_id') or '').strip()
 
 
-def _request_display_name(default_name: str = 'FamilyOne Web') -> str:
+def _request_display_name(default_name: str = 'Веб-клиент Семейного древа') -> str:
     payload = request.get_json(silent=True) or {}
     if isinstance(payload, dict):
         display_name = str(payload.get('displayName') or payload.get('display_name') or '').strip()
@@ -262,7 +262,7 @@ def register_sql_api_v2(app, *, base_dir: Path, logger=None) -> None:
     def auth_bootstrap():
         device_id = _request_device_id()
         if device_id:
-            ensure_local_user(db_path, device_id, _request_display_name('FamilyOne Web'))
+            ensure_local_user(db_path, device_id, _request_display_name('Веб-клиент Семейного древа'))
         return _json_response(_bootstrap_snapshot(db_path))
 
     @app.get('/api/v2/auth/me')

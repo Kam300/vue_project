@@ -53,8 +53,8 @@ function triggerShake(): void {
         </svg>
       </div>
 
-      <img :src="logoIcon" alt="FamilyOne logo" class="lock-brand-logo" />
-      <h1 class="lock-title">FamilyOne</h1>
+      <img :src="logoIcon" alt="Логотип Семейного древа" class="lock-brand-logo" />
+      <h1 class="lock-title">Семейное древо</h1>
       <p class="lock-subtitle">Введите PIN для доступа</p>
 
       <div class="lock-form" :class="{ shake }">

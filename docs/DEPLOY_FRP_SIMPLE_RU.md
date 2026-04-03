@@ -1,4 +1,4 @@
-# Простой туториал: публикация FamilyOne на `totalcode.online` (Windows + VPS + FRP)
+# Простой туториал: публикация «Семейного древа» на `totalcode.online` (Windows + VPS + FRP)
 
 Этот вариант работает без Cloudflare Tunnel:
 - сайт и API крутятся на вашем Windows-ПК;
@@ -147,4 +147,3 @@ ss -lntp | egrep ':80|:443|:7000|:8080'
 ```powershell
 .\start-server.ps1 -NoTunnel
 ```
-

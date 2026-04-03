@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import logoIcon from '@/assets/icon.png'
 import AppIcon from '@/components/shared/AppIcon.vue'
 import SyncProgress from '@/components/shared/SyncProgress.vue'
+import YandexIdButton from '@/components/shared/YandexIdButton.vue'
 import { connectPortableIdentityAndSync } from '@/services/portableIdentitySync'
 import { useAppStore } from '@/stores/appStore'
 
@@ -42,7 +43,7 @@ const privacyPolicyItems = [
 const pages = [
   {
     icon: 'waving_hand',
-    title: 'Добро пожаловать в FamilyOne Web',
+    title: 'Добро пожаловать в Семейное древо',
     text: 'Приложение хранит данные локально в браузере и умеет переносить backup между устройствами.'
   },
   {
@@ -128,8 +129,8 @@ async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void>
   <section class="onboarding-page">
     <div class="onboarding-center">
       <div class="onboarding-brand">
-        <img :src="logoIcon" alt="FamilyOne logo" class="onboarding-brand-logo" />
-        <span>FamilyOne</span>
+        <img :src="logoIcon" alt="Логотип Семейного древа" class="onboarding-brand-logo" />
+        <span>Семейное древо</span>
       </div>
 
       <div class="progress-bar onboarding-progress">
@@ -164,7 +165,7 @@ async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void>
           </label>
 
           <div class="policy-text">
-            <p class="policy-heading">Семейное древо — FamilyOne</p>
+            <p class="policy-heading">Семейное древо</p>
             <ol class="policy-list">
               <li v-for="item in privacyPolicyItems" :key="item.title">
                 <strong>{{ item.title }}</strong>
@@ -189,19 +190,17 @@ async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void>
             </p>
 
             <div class="btn-row backup-auth-actions">
-              <button
-                class="btn-action primary"
+              <YandexIdButton
                 @click="connectPortableIdentity('yandex')"
                 :disabled="authBusy !== '' || !yandexConfigured"
-              >
-                {{ authBusy === 'yandex' ? 'Подключение…' : 'Подключить Яндекс ID' }}
-              </button>
+                :loading="authBusy === 'yandex'"
+              />
               <button
                 class="btn-action"
                 @click="connectPortableIdentity('vk')"
                 :disabled="authBusy !== '' || !vkConfigured"
               >
-                {{ authBusy === 'vk' ? 'Подключение…' : 'Подключить VK ID' }}
+                {{ authBusy === 'vk' ? 'Подключение…' : 'Войти с VK ID' }}
               </button>
             </div>
 

@@ -28,7 +28,7 @@ except ImportError:
     bundled_paramiko = None
 
 
-APP_TITLE = "FamilyOne: настройка сервера на ПК"
+APP_TITLE = "Семейное древо: настройка сервера на ПК"
 DEFAULTS = {
     "vps_host": "",
     "vps_user": "root",
@@ -144,7 +144,7 @@ def resolve_project_root() -> Path:
             return candidate
 
     raise FileNotFoundError(
-        "Не удалось найти корень проекта. Поместите программу внутрь папки проекта FamilyOne."
+        "Не удалось найти корень проекта. Поместите программу внутрь папки проекта «Семейное древо»."
     )
 
 

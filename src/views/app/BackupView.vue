@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import SyncProgress from '@/components/shared/SyncProgress.vue'
+import YandexIdButton from '@/components/shared/YandexIdButton.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useMemberStore } from '@/stores/memberStore'
 import { addBackupAudit, getBackupAudit } from '@/db/repositories'
@@ -423,19 +424,17 @@ async function removeRemoteBackup(): Promise<void> {
         </div>
 
         <div class="btn-row">
-          <button
-            class="btn-action"
+          <YandexIdButton
             @click="connectProvider('yandex')"
             :disabled="authBusy !== '' || !yandexConfigured"
-          >
-            {{ authBusy === 'yandex' ? 'Подключение…' : 'Подключить Яндекс ID' }}
-          </button>
+            :loading="authBusy === 'yandex'"
+          />
           <button
             class="btn-action"
             @click="connectProvider('vk')"
             :disabled="authBusy !== '' || !vkConfigured"
           >
-            {{ authBusy === 'vk' ? 'Подключение…' : 'Подключить VK ID' }}
+            {{ authBusy === 'vk' ? 'Подключение…' : 'Войти с VK ID' }}
           </button>
           <button class="btn-action" @click="refreshPortableState" :disabled="authBusy !== '' || metaBusy">
             Обновить статус

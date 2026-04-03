@@ -28,17 +28,17 @@ const infoItems = [
 <template>
   <section class="app-page">
     <div class="app-container">
-      <PageHeader icon="info" title="О проекте" subtitle="FamilyOne Web (PWA)" />
+      <PageHeader icon="info" title="О проекте" subtitle="Семейное древо (PWA)" />
 
       <article class="app-card about-card">
         <!-- App info header -->
         <div class="about-hero">
           <div class="about-logo">
-            <img :src="logoIcon" alt="FamilyOne logo" class="about-logo-img" />
+            <img :src="logoIcon" alt="Логотип Семейного древа" class="about-logo-img" />
           </div>
           <div>
-            <h2 class="about-app-name">FamilyOne</h2>
-            <p class="about-tagline">Семейное Древо — PWA</p>
+            <h2 class="about-app-name">Семейное древо</h2>
+            <p class="about-tagline">PWA-приложение для семейного древа</p>
             <div class="about-actions">
               <span class="android-note">Доступно Android-приложение</span>
               <a class="apk-link-btn" :href="androidApkUrl" download="app-debug.apk">

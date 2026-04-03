@@ -80,8 +80,8 @@ watch(
       <div class="app-container app-header-inner">
         <div class="brand-wrap">
           <RouterLink to="/" class="brand-link">
-            <img :src="logoIcon" alt="FamilyOne logo" class="brand-logo" />
-            <span class="brand-text">FamilyOne</span>
+            <img :src="logoIcon" alt="Логотип Семейного древа" class="brand-logo" />
+            <span class="brand-text">Семейное древо</span>
           </RouterLink>
           <button
             class="theme-toggle-btn"

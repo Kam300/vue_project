@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_DISPLAY_NAME = 'Локальный пользователь FamilyOne'
+DEFAULT_DISPLAY_NAME = 'Локальный пользователь Семейного древа'
 
 
 def utcnow_sql() -> str:

@@ -126,11 +126,17 @@ onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
 })
 
+const activeTechIndex = ref(0)
+
+function setActiveTech(index) {
+  activeTechIndex.value = index
+}
+
 const features = [
-  { icon: 'face', title: 'Распознавание лиц', desc: 'Технология face_recognition идентифицирует членов семьи на фотографиях с точностью до 98%.' },
-  { icon: 'pdf', title: 'Генерация документов', desc: 'Красивое семейное древо в формате PDF с помощью ReportLab — готово к печати.' },
+  { icon: 'face', title: 'Распознавание лиц', desc: 'Серверный модуль на базе face_recognition и dlib помогает находить и привязывать лица к профилям членов семьи.' },
+  { icon: 'pdf', title: 'Генерация документов', desc: 'Экспорт семейного древа в PDF через ReportLab: удобно для печати, архива и обмена.' },
   { icon: 'tree', title: 'Семейные связи', desc: 'Визуализация поколений, связей и родственных отношений в удобном интерфейсе.' },
-  { icon: 'cloud', title: 'Облачный сервер', desc: 'АПИ-сервер с Cloudflare Tunnel обеспечивает доступ из любой точки мира.' },
+  { icon: 'cloud', title: 'VPS и внешний доступ', desc: 'Публикация через VPS, FRP и Caddy даёт внешний HTTPS-доступ к серверу и web-приложению.' },
 ]
 
 const steps = [
@@ -140,14 +146,78 @@ const steps = [
 ]
 
 const techStack = [
-  { name: 'Android / Kotlin', color: '#a4c639' },
-  { name: 'Python / Flask', color: '#3776ab' },
-  { name: 'Vue.js 3', color: '#42b883' },
-  { name: 'face_recognition', color: '#f472b6' },
-  { name: 'ReportLab', color: '#fbbf24' },
-  { name: 'Cloudflare', color: '#f6821f' },
-  { name: 'Caddy Server', color: '#22d3ee' },
-  { name: 'OkHttp', color: '#a78bfa' },
+  {
+    name: 'Android / Kotlin',
+    color: '#a4c639',
+    what: 'Нативный Android-клиент на Kotlin.',
+    purpose: 'Это основное мобильное приложение, в котором пользователь работает с семейным древом.'
+  },
+  {
+    name: 'Room / SQLite',
+    color: '#7cc2ff',
+    what: 'Локальная база данных внутри Android-приложения.',
+    purpose: 'Нужна для хранения членов семьи, связей и данных на устройстве, в том числе без постоянного интернета.'
+  },
+  {
+    name: 'Python / Flask',
+    color: '#3776ab',
+    what: 'Серверная часть и HTTP API на Python.',
+    purpose: 'Обрабатывает запросы приложения, объединяет серверные модули и отдаёт данные клиентам.'
+  },
+  {
+    name: 'Waitress',
+    color: '#6ea8fe',
+    what: 'Production WSGI-сервер для запуска Flask.',
+    purpose: 'Используется для стабильного запуска backend на VPS без dev-режима.'
+  },
+  {
+    name: 'Vue 3 / Pinia',
+    color: '#42b883',
+    what: 'Web-интерфейс и управление состоянием приложения в браузере.',
+    purpose: 'Дают web-версию проекта и связывают экраны, формы и данные в едином интерфейсе.'
+  },
+  {
+    name: 'Dexie / IndexedDB',
+    color: '#2dd4bf',
+    what: 'Браузерное локальное хранилище поверх IndexedDB.',
+    purpose: 'Нужно для офлайн-работы, кэша и локального хранения данных в web-приложении.'
+  },
+  {
+    name: 'face_recognition / dlib',
+    color: '#f472b6',
+    what: 'Библиотеки компьютерного зрения для работы с лицами.',
+    purpose: 'Помогают находить лица на фотографиях и привязывать их к профилям членов семьи.'
+  },
+  {
+    name: 'ReportLab',
+    color: '#fbbf24',
+    what: 'Python-библиотека генерации PDF.',
+    purpose: 'Формирует экспорт семейного древа и другие документы, удобные для печати и архива.'
+  },
+  {
+    name: 'FRP',
+    color: '#f97316',
+    what: 'Система reverse proxy и туннелей.',
+    purpose: 'Пробрасывает локальный сервис наружу через VPS, чтобы к нему можно было подключаться извне.'
+  },
+  {
+    name: 'Caddy',
+    color: '#22d3ee',
+    what: 'Веб-сервер и reverse proxy с удобной HTTPS-настройкой.',
+    purpose: 'Публикует сайт и API, а также упрощает маршрутизацию и внешний доступ.'
+  },
+  {
+    name: 'OkHttp',
+    color: '#a78bfa',
+    what: 'HTTP-клиент для Android.',
+    purpose: 'Используется мобильным приложением для запросов к серверу и обмена данными.'
+  },
+  {
+    name: 'Yandex ID OAuth',
+    color: '#ef4444',
+    what: 'Авторизация через аккаунт Яндекса.',
+    purpose: 'Упрощает вход в web-приложение и помогает связать пользователя с его данными и устройствами.'
+  },
 ]
 const androidApkUrl = '/app-debug.apk'
 </script>
@@ -165,8 +235,8 @@ const androidApkUrl = '/app-debug.apk'
     <nav class="navbar animate-in">
       <div class="container nav-inner">
         <div class="nav-brand">
-          <img :src="logoIcon" alt="FamilyOne Logo" class="nav-logo" />
-          <span>FamilyOne</span>
+          <img :src="logoIcon" alt="Логотип Семейного древа" class="nav-logo" />
+          <span>Семейное древо</span>
         </div>
         <div class="nav-links">
           <a href="#features">Возможности</a>
@@ -211,7 +281,7 @@ const androidApkUrl = '/app-debug.apk'
             <div class="stat-divider"></div>
             <div class="stat">
               <span class="stat-value">24/7</span>
-              <span class="stat-label">Облачный API</span>
+              <span class="stat-label">VPS + FRP + Caddy</span>
             </div>
           </div>
         </div>
@@ -292,18 +362,41 @@ const androidApkUrl = '/app-debug.apk'
       <div class="container">
         <h2 class="section-title animate-in">Стек технологий</h2>
         <p class="section-subtitle animate-in delay-1">Проект построен на современных и надёжных инструментах</p>
+        <p class="tech-hint animate-in delay-2">Наведите, сфокусируйте или коснитесь технологии, чтобы увидеть объяснение.</p>
         <div class="tech-badges animate-in delay-2">
-          <span v-for="(t, i) in techStack" :key="i" class="tech-badge" :style="{ '--badge-color': t.color }">
+          <button
+            v-for="(t, i) in techStack"
+            :key="i"
+            type="button"
+            class="tech-badge"
+            :class="{ 'is-active': activeTechIndex === i }"
+            :style="{ '--badge-color': t.color }"
+            :aria-label="`${t.name}. Что это: ${t.what}. Для чего: ${t.purpose}`"
+            @mouseenter="setActiveTech(i)"
+            @focus="setActiveTech(i)"
+            @click="setActiveTech(i)"
+          >
             <span class="badge-dot" :style="{ background: t.color }"></span>
-            {{ t.name }}
-          </span>
+            <span>{{ t.name }}</span>
+          </button>
         </div>
-        <article class="project-apk-note animate-in delay-3">
+        <article v-if="techStack[activeTechIndex]" class="tech-detail animate-in delay-3" :style="{ '--badge-color': techStack[activeTechIndex].color }">
+          <header class="tech-detail-header">
+            <span class="tech-detail-meta">
+              <span class="badge-dot" :style="{ background: techStack[activeTechIndex].color }"></span>
+              <strong>{{ techStack[activeTechIndex].name }}</strong>
+            </span>
+            <span class="tech-detail-caption">Роль в проекте</span>
+          </header>
+          <p class="tech-detail-text"><span class="tech-detail-label">Что это:</span> {{ techStack[activeTechIndex].what }}</p>
+          <p class="tech-detail-text"><span class="tech-detail-label">Для чего:</span> {{ techStack[activeTechIndex].purpose }}</p>
+        </article>
+        <article class="project-apk-note animate-in delay-4">
           <h3 class="project-apk-title">
             <AppIcon name="android" :size="20" />
-            В разделе «О проекте» доступно Android-приложение
+            На сайте доступна актуальная Android-сборка
           </h3>
-          <p class="project-apk-text">Сборку можно скачать напрямую с сайта.</p>
+          <p class="project-apk-text">APK собирается из текущего Android-проекта и доступен для прямой загрузки.</p>
           <a class="btn btn-outline project-apk-link" :href="androidApkUrl" download="app-debug.apk">
             <AppIcon name="download" :size="18" />
             Скачать app-debug.apk
@@ -391,8 +484,8 @@ const androidApkUrl = '/app-debug.apk'
     <footer class="footer">
       <div class="container footer-inner">
         <div class="footer-brand">
-          <img :src="logoIcon" alt="FamilyOne Logo" class="nav-logo" />
-          <span>FamilyOne — Семейное Древо</span>
+          <img :src="logoIcon" alt="Логотип Семейного древа" class="nav-logo" />
+          <span>Семейное древо</span>
         </div>
         <p class="footer-copy">© 2026 Дипломный проект. Все права защищены.</p>
       </div>
@@ -668,19 +761,79 @@ const androidApkUrl = '/app-debug.apk'
 .tech-badges {
   display: flex; flex-wrap: wrap; justify-content: center; gap: 12px;
 }
+.tech-hint {
+  margin: 0 0 18px;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
 .tech-badge {
+  appearance: none;
   display: inline-flex; align-items: center; gap: 8px;
   padding: 10px 20px; border-radius: 999px;
   background: var(--color-glass);
   border: 1px solid var(--color-glass-border);
+  color: var(--color-text);
   font-size: 0.88rem; font-weight: 500;
-  transition: all 0.3s;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  transition: all 0.3s ease;
 }
-.tech-badge:hover {
+.tech-badge:hover,
+.tech-badge.is-active,
+.tech-badge:focus-visible {
   border-color: var(--badge-color);
+  transform: translateY(-2px);
   box-shadow: 0 0 20px color-mix(in srgb, var(--badge-color) 25%, transparent);
 }
+.tech-badge:focus-visible {
+  outline: none;
+}
 .badge-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+.tech-detail {
+  margin: 18px auto 0;
+  max-width: 760px;
+  text-align: left;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--badge-color) 12%, rgba(255,255,255,0.03)), rgba(255,255,255,0.02)),
+    var(--color-glass);
+  border: 1px solid color-mix(in srgb, var(--badge-color) 45%, var(--color-glass-border));
+  border-radius: var(--radius-lg);
+  padding: 18px 20px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+}
+.tech-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.tech-detail-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 1rem;
+}
+.tech-detail-caption {
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.tech-detail-text {
+  margin: 0;
+  color: var(--color-text-secondary);
+  line-height: 1.65;
+}
+.tech-detail-text + .tech-detail-text {
+  margin-top: 8px;
+}
+.tech-detail-label {
+  color: var(--color-text);
+  font-weight: 600;
+}
 
 .project-apk-note {
   margin: 26px auto 0;
@@ -924,6 +1077,8 @@ const androidApkUrl = '/app-debug.apk'
   /* Tech badges */
   .tech-badges { gap: 8px; }
   .tech-badge { padding: 8px 14px; font-size: 0.82rem; }
+  .tech-detail { padding: 16px; }
+  .tech-detail-header { flex-direction: column; align-items: flex-start; }
 
   /* Step cards */
   .step-card { padding: 28px 20px; }
