@@ -1,21 +1,17 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
+import SyncProgress from '@/components/shared/SyncProgress.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useMemberStore } from '@/stores/memberStore'
 import { addBackupAudit, getBackupAudit } from '@/db/repositories'
 import { backupDelete, backupDownload, backupMeta, backupUpload } from '@/services/api'
-import {
-  ensureGoogleIdentityLoaded,
-  getGoogleClientId,
-  signInWithGooglePopup,
-  signOutGoogle
-} from '@/services/googleIdentity'
 import { createBackupArchive, restoreBackupArchive } from '@/services/backupArchive'
 import { syncProfileFaces } from '@/services/familySync'
+import { connectPortableIdentityAndSync } from '@/services/portableIdentitySync'
 import { downloadBlob } from '@/utils/download'
-import type { BackupAuditRecord } from '@/types/models'
 import type { BackupMetaResponse } from '@/types/api'
+import type { BackupAuditRecord } from '@/types/models'
 
 const appStore = useAppStore()
 const memberStore = useMemberStore()
@@ -29,42 +25,47 @@ const remoteMeta = ref<BackupMetaResponse | null>(null)
 const status = ref('')
 const error = ref('')
 
-const authBusy = ref(false)
+const authBusy = ref<'yandex' | 'vk' | ''>('')
+const authProgress = ref(0)
+const authProgressLabel = ref('')
 const metaBusy = ref(false)
 const buildBusy = ref(false)
 const uploadBusy = ref(false)
 const downloadBusy = ref(false)
 const deleteBusy = ref(false)
 const restoreBusy = ref(false)
-
-const hasGoogleClientId = computed(() => Boolean(getGoogleClientId()))
-const isAuthorized = computed(() => Boolean(appStore.googleIdToken))
-const canUseServerBackup = computed(() => Boolean(appStore.settings.deviceId))
 const autoSyncBusy = ref(false)
 let autoSyncTimer = 0
+
+const yandexConfigured = computed(() => Boolean(appStore.authProviders?.yandex?.configured))
+const vkConfigured = computed(() => Boolean(appStore.authProviders?.vk?.configured))
+const portableIdentity = computed(() => appStore.portableIdentity)
+const canUseServerBackup = computed(() => Boolean(appStore.settings.deviceId))
+const portableIdentitySummary = computed(() => {
+  if (!portableIdentity.value) {
+    return 'Сейчас работает локальная сессия. Чтобы восстанавливать backup на другом ПК, подключите Яндекс ID.'
+  }
+
+  const providerTitle = portableIdentity.value.provider === 'yandex' ? 'Яндекс ID подключен' : 'VK ID подключён'
+  const name = portableIdentity.value.displayName || appStore.authUser?.displayName || ''
+  return name ? `${providerTitle} — ${name}` : providerTitle
+})
 
 function clearMessages(): void {
   status.value = ''
   error.value = ''
 }
 
+function getBackupDeviceId(): string {
+  const deviceId = String(appStore.settings.deviceId || '').trim()
+  if (!deviceId) {
+    throw new Error('Device ID не инициализирован. Перезапустите приложение.')
+  }
+  return deviceId
+}
+
 function applyRemoteError(prefix: string, reason: unknown): void {
   const message = (reason as Error).message || 'Unknown error'
-  const normalized = message.toLowerCase()
-  const isAuthError =
-    normalized.includes('invalid or expired google token') ||
-    normalized.includes('missing bearer token') ||
-    normalized.includes('x-familyone-device') ||
-    normalized.includes('http 401') ||
-    normalized.includes('unauthorized')
-
-  if (isAuthError) {
-    appStore.clearGoogleToken()
-    remoteMeta.value = null
-    error.value = `${prefix}: ${message}. Выполните вход через Google снова.`
-    return
-  }
-
   error.value = `${prefix}: ${message}`
 }
 
@@ -72,78 +73,14 @@ async function reloadAudit(): Promise<void> {
   audit.value = await getBackupAudit()
 }
 
-async function initializeScreen(): Promise<void> {
-  if (!memberStore.members.length) {
-    await memberStore.refresh()
-  }
-  await reloadAudit()
-  if (canUseServerBackup.value) {
-    await fetchRemoteMeta({ silent: true })
-  }
-}
-
-onMounted(() => {
-  initializeScreen()
-  if (canUseServerBackup.value) {
-    autoSyncTimer = window.setInterval(() => {
-      void refreshRemoteStatusSilently()
-    }, 30000)
-  }
-})
-
-onUnmounted(() => {
-  if (autoSyncTimer) {
-    window.clearInterval(autoSyncTimer)
-  }
-})
-
-async function signInGoogle(): Promise<void> {
-  clearMessages()
-  if (!hasGoogleClientId.value) {
-    status.value = 'Google OAuth не настроен. Используется device auth режим для серверного backup.'
-    return
-  }
-
-  authBusy.value = true
-  try {
-    await ensureGoogleIdentityLoaded()
-    const token = await signInWithGooglePopup()
-    appStore.setGoogleToken(token, 'Google account')
-    status.value = 'Google вход выполнен.'
-    await fetchRemoteMeta()
-  } catch (reason) {
-    error.value = `Google вход не выполнен: ${(reason as Error).message || 'Unknown error'}`
-  } finally {
-    authBusy.value = false
-  }
-}
-
-function signOut(): void {
-  signOutGoogle(appStore.googleIdToken)
-  appStore.clearGoogleToken()
-  remoteMeta.value = null
-  status.value = 'Google сессия очищена.'
-}
-
-function getBackupAuthContext(): { token: string; deviceId: string } {
-  const deviceId = String(appStore.settings.deviceId || '').trim()
-  if (!deviceId) {
-    throw new Error('Device ID не инициализирован. Перезапустите приложение.')
-  }
-  return {
-    token: appStore.googleIdToken || '',
-    deviceId
-  }
-}
-
 async function fetchRemoteMeta(options: { silent?: boolean } = {}): Promise<void> {
   if (!options.silent) {
     clearMessages()
   }
 
-  let auth: { token: string; deviceId: string }
+  let deviceId = ''
   try {
-    auth = getBackupAuthContext()
+    deviceId = getBackupDeviceId()
   } catch (reason) {
     if (!options.silent) {
       error.value = (reason as Error).message
@@ -153,7 +90,7 @@ async function fetchRemoteMeta(options: { silent?: boolean } = {}): Promise<void
 
   metaBusy.value = true
   try {
-    remoteMeta.value = await backupMeta(auth.token, auth.deviceId)
+    remoteMeta.value = await backupMeta('', deviceId)
     if (!options.silent) {
       status.value = remoteMeta.value.exists
         ? 'Метаданные серверного backup получены.'
@@ -168,6 +105,14 @@ async function fetchRemoteMeta(options: { silent?: boolean } = {}): Promise<void
   }
 }
 
+async function initializeScreen(): Promise<void> {
+  await Promise.all([
+    memberStore.refresh(),
+    reloadAudit(),
+    canUseServerBackup.value ? fetchRemoteMeta({ silent: true }) : Promise.resolve()
+  ])
+}
+
 async function refreshRemoteStatusSilently(): Promise<void> {
   if (!canUseServerBackup.value || metaBusy.value || autoSyncBusy.value) return
   autoSyncBusy.value = true
@@ -175,6 +120,61 @@ async function refreshRemoteStatusSilently(): Promise<void> {
     await fetchRemoteMeta({ silent: true })
   } finally {
     autoSyncBusy.value = false
+  }
+}
+
+onMounted(() => {
+  void initializeScreen()
+  if (canUseServerBackup.value) {
+    autoSyncTimer = window.setInterval(() => {
+      void refreshRemoteStatusSilently()
+    }, 30000)
+  }
+})
+
+onUnmounted(() => {
+  if (autoSyncTimer) {
+    window.clearInterval(autoSyncTimer)
+  }
+})
+
+async function connectProvider(provider: 'yandex' | 'vk'): Promise<void> {
+  clearMessages()
+  authBusy.value = provider
+  authProgress.value = 0
+  authProgressLabel.value = 'Подготовка…'
+
+  try {
+    status.value = await connectPortableIdentityAndSync(provider, {
+      onProgress(step) {
+        authProgress.value = step.progress
+        authProgressLabel.value = step.message
+      },
+      afterSync: async () => {
+        await Promise.all([
+          appStore.refreshAuthState(),
+          reloadAudit(),
+          canUseServerBackup.value ? fetchRemoteMeta({ silent: true }) : Promise.resolve()
+        ])
+      }
+    })
+  } catch (reason) {
+    error.value = `Не удалось завершить вход: ${(reason as Error).message || 'unknown error'}`
+  } finally {
+    authBusy.value = ''
+  }
+}
+
+async function refreshPortableState(): Promise<void> {
+  clearMessages()
+  try {
+    await appStore.refreshAuthState()
+    if (canUseServerBackup.value) {
+      await fetchRemoteMeta({ silent: true })
+    }
+    status.value = 'Статус переносимой учётной записи обновлён.'
+  } catch (reason) {
+    error.value = `Не удалось обновить статус: ${(reason as Error).message || 'unknown error'}`
   }
 }
 
@@ -229,9 +229,9 @@ async function buildLocalBackup(): Promise<void> {
 async function buildAndUploadRemote(): Promise<void> {
   clearMessages()
 
-  let auth: { token: string; deviceId: string }
+  let deviceId = ''
   try {
-    auth = getBackupAuthContext()
+    deviceId = getBackupDeviceId()
   } catch (reason) {
     error.value = (reason as Error).message
     return
@@ -240,7 +240,7 @@ async function buildAndUploadRemote(): Promise<void> {
   uploadBusy.value = true
   try {
     const backup = await createBackupArchive()
-    const response = await backupUpload(auth.token, backup.file, auth.deviceId)
+    const response = await backupUpload('', backup.file, deviceId)
     remoteMeta.value = response
     await addBackupAudit('backup_upload', JSON.stringify({ upload: response, local: backup }))
     await reloadAudit()
@@ -263,9 +263,9 @@ async function onUploadFile(event: Event): Promise<void> {
   target.value = ''
   if (!file) return
 
-  let auth: { token: string; deviceId: string }
+  let deviceId = ''
   try {
-    auth = getBackupAuthContext()
+    deviceId = getBackupDeviceId()
   } catch (reason) {
     error.value = (reason as Error).message
     return
@@ -273,7 +273,7 @@ async function onUploadFile(event: Event): Promise<void> {
 
   uploadBusy.value = true
   try {
-    const response = await backupUpload(auth.token, file, auth.deviceId)
+    const response = await backupUpload('', file, deviceId)
     remoteMeta.value = response
     await addBackupAudit('backup_upload', JSON.stringify({ uploadedFile: file.name, response }))
     await reloadAudit()
@@ -288,9 +288,9 @@ async function onUploadFile(event: Event): Promise<void> {
 async function downloadRemoteBackup(): Promise<void> {
   clearMessages()
 
-  let auth: { token: string; deviceId: string }
+  let deviceId = ''
   try {
-    auth = getBackupAuthContext()
+    deviceId = getBackupDeviceId()
   } catch (reason) {
     error.value = (reason as Error).message
     return
@@ -298,7 +298,7 @@ async function downloadRemoteBackup(): Promise<void> {
 
   downloadBusy.value = true
   try {
-    const blob = await backupDownload(auth.token, auth.deviceId)
+    const blob = await backupDownload('', deviceId)
     const fileName = `familyone_backup_remote_${new Date().toISOString().slice(0, 10)}.zip`
     downloadBlob(blob, fileName)
     await addBackupAudit('backup_download', `remote:${blob.size}`)
@@ -357,9 +357,9 @@ async function onRestoreFile(event: Event): Promise<void> {
 async function restoreFromRemote(): Promise<void> {
   clearMessages()
 
-  let auth: { token: string; deviceId: string }
+  let deviceId = ''
   try {
-    auth = getBackupAuthContext()
+    deviceId = getBackupDeviceId()
   } catch (reason) {
     error.value = (reason as Error).message
     return
@@ -367,7 +367,7 @@ async function restoreFromRemote(): Promise<void> {
 
   downloadBusy.value = true
   try {
-    const blob = await backupDownload(auth.token, auth.deviceId)
+    const blob = await backupDownload('', deviceId)
     await restoreFromBlob(blob, 'remote-download')
   } catch (reason) {
     applyRemoteError('Ошибка restore с сервера', reason)
@@ -379,9 +379,9 @@ async function restoreFromRemote(): Promise<void> {
 async function removeRemoteBackup(): Promise<void> {
   clearMessages()
 
-  let auth: { token: string; deviceId: string }
+  let deviceId = ''
   try {
-    auth = getBackupAuthContext()
+    deviceId = getBackupDeviceId()
   } catch (reason) {
     error.value = (reason as Error).message
     return
@@ -391,8 +391,8 @@ async function removeRemoteBackup(): Promise<void> {
 
   deleteBusy.value = true
   try {
-    const response = await backupDelete(auth.token, auth.deviceId)
-    remoteMeta.value = null
+    const response = await backupDelete('', deviceId)
+    remoteMeta.value = response.deleted ? { success: true, exists: false, schemaVersion: response.schemaVersion } : remoteMeta.value
     await addBackupAudit('backup_delete', JSON.stringify(response))
     await reloadAudit()
     status.value = response.deleted ? 'Серверный backup удалён.' : 'Серверный backup не найден.'
@@ -410,34 +410,53 @@ async function removeRemoteBackup(): Promise<void> {
       <PageHeader
         icon="cloud"
         title="Резервные копии"
-        subtitle="Локальный ZIP, серверное резервирование через Google и восстановление"
+        subtitle="Локальный ZIP, серверное резервирование и перенос между устройствами"
       />
 
       <article class="app-card block">
-        <h2>Авторизация Google</h2>
-        <p class="status-line" v-if="!hasGoogleClientId">
-          `VITE_GOOGLE_WEB_CLIENT_ID` не задан. Будет использован device auth режим.
-        </p>
+        <h2>Перенос между устройствами</h2>
+        <p class="status-line">{{ portableIdentitySummary }}</p>
+
+        <div class="identity-pill" v-if="portableIdentity">
+          {{ portableIdentity.provider === 'yandex' ? 'Яндекс ID подключен' : 'VK ID подключён' }}
+          <span v-if="portableIdentity.displayName">{{ portableIdentity.displayName }}</span>
+        </div>
 
         <div class="btn-row">
-          <button class="btn-action" @click="signInGoogle" :disabled="authBusy || !hasGoogleClientId">
-            {{ authBusy ? 'Вход...' : isAuthorized ? 'Войти заново' : 'Войти через Google' }}
+          <button
+            class="btn-action"
+            @click="connectProvider('yandex')"
+            :disabled="authBusy !== '' || !yandexConfigured"
+          >
+            {{ authBusy === 'yandex' ? 'Подключение…' : 'Подключить Яндекс ID' }}
           </button>
-          <button class="btn-action" @click="signOut" :disabled="!isAuthorized">Выйти</button>
-          <button class="btn-action" @click="fetchRemoteMeta()" :disabled="!canUseServerBackup || metaBusy">
-            {{ metaBusy ? 'Синхронизация...' : 'Синхронизировать статус' }}
+          <button
+            class="btn-action"
+            @click="connectProvider('vk')"
+            :disabled="authBusy !== '' || !vkConfigured"
+          >
+            {{ authBusy === 'vk' ? 'Подключение…' : 'Подключить VK ID' }}
+          </button>
+          <button class="btn-action" @click="refreshPortableState" :disabled="authBusy !== '' || metaBusy">
+            Обновить статус
           </button>
         </div>
+
+        <SyncProgress
+          :visible="Boolean(authBusy)"
+          :progress="authProgress"
+          :label="authProgressLabel"
+        />
       </article>
 
       <article class="app-card block">
         <h2>Локальный backup</h2>
         <div class="btn-row">
           <button class="btn-action" @click="buildLocalBackup" :disabled="buildBusy">
-            {{ buildBusy ? 'Подготовка...' : 'Собрать и скачать ZIP' }}
+            {{ buildBusy ? 'Подготовка…' : 'Собрать и скачать ZIP' }}
           </button>
           <button class="btn-action" @click="pickRestoreFile" :disabled="restoreBusy">
-            {{ restoreBusy ? 'Восстановление...' : 'Восстановить из ZIP' }}
+            {{ restoreBusy ? 'Восстановление…' : 'Восстановить из ZIP' }}
           </button>
         </div>
       </article>
@@ -445,23 +464,28 @@ async function removeRemoteBackup(): Promise<void> {
       <article class="app-card block">
         <h2>Серверный backup</h2>
         <p class="status-line" v-if="hasRemoteChanges">
-          На сервере есть более новый backup. Нажмите «Синхронизировать из backup».
+          На сервере есть более новый backup. Нажмите «Синхронизировать с сервера».
         </p>
+
         <div class="btn-row">
           <button class="btn-action primary" @click="buildAndUploadRemote" :disabled="!canUseServerBackup || uploadBusy">
-            {{ uploadBusy ? 'Загрузка...' : 'Собрать и загрузить' }}
+            {{ uploadBusy ? 'Загрузка…' : 'Собрать и загрузить' }}
           </button>
           <button class="btn-action" @click="pickUploadFile" :disabled="!canUseServerBackup || uploadBusy">
             Загрузить ZIP файл
           </button>
           <button class="btn-action" @click="downloadRemoteBackup" :disabled="!canUseServerBackup || downloadBusy">
-            {{ downloadBusy ? 'Скачивание...' : 'Скачать ZIP' }}
+            {{ downloadBusy ? 'Скачивание…' : 'Скачать ZIP' }}
           </button>
-          <button class="btn-action" @click="restoreFromRemote" :disabled="!canUseServerBackup || restoreBusy || downloadBusy">
-            {{ restoreBusy ? 'Синхронизация...' : 'Синхронизировать с сервера' }}
+          <button
+            class="btn-action"
+            @click="restoreFromRemote"
+            :disabled="!canUseServerBackup || restoreBusy || downloadBusy"
+          >
+            {{ restoreBusy ? 'Синхронизация…' : 'Синхронизировать с сервера' }}
           </button>
           <button class="btn-action danger" @click="removeRemoteBackup" :disabled="!canUseServerBackup || deleteBusy">
-            {{ deleteBusy ? 'Удаление...' : 'Удалить резервную копию' }}
+            {{ deleteBusy ? 'Удаление…' : 'Удалить резервную копию' }}
           </button>
         </div>
 
@@ -471,13 +495,13 @@ async function removeRemoteBackup(): Promise<void> {
           <div class="meta-row" v-if="remoteMeta.updatedAtUtc"><strong>Обновлён:</strong> {{ remoteMeta.updatedAtUtc }}</div>
           <div class="meta-row" v-if="remoteMeta.sizeBytes"><strong>Размер:</strong> {{ remoteMeta.sizeBytes }} байт</div>
           <div class="meta-row" v-if="remoteMeta.membersCount !== undefined">
-            <strong>Людей:</strong> {{ remoteMeta.membersCount }}
+            <strong>Профили:</strong> {{ remoteMeta.membersCount }}
           </div>
           <div class="meta-row" v-if="remoteMeta.memberPhotosCount !== undefined">
             <strong>Фото:</strong> {{ remoteMeta.memberPhotosCount }}
           </div>
           <div class="meta-row" v-if="remoteMeta.assetsCount !== undefined">
-            <strong>Файлов:</strong> {{ remoteMeta.assetsCount }}
+            <strong>Assets:</strong> {{ remoteMeta.assetsCount }}
           </div>
         </div>
       </article>
@@ -539,6 +563,18 @@ async function removeRemoteBackup(): Promise<void> {
   margin-bottom: 12px;
 }
 
+.identity-pill {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--color-glass-border);
+  color: var(--color-text);
+  background: rgba(255, 255, 255, 0.03);
+}
+
 .meta-box {
   margin-top: 14px;
   border: 1px solid var(--color-glass-border);
@@ -571,7 +607,3 @@ async function removeRemoteBackup(): Promise<void> {
   color: var(--color-error);
 }
 </style>
-
-
-
-

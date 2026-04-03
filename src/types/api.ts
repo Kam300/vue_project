@@ -94,3 +94,37 @@ export interface BackupMetaResponse {
   updatedAtUtc?: string
   error?: string
 }
+
+export interface AuthProviderConfig {
+  configured: boolean
+}
+
+export interface AuthIdentityResponse {
+  provider: string
+  providerUserId?: string
+  displayName?: string | null
+  email?: string | null
+  phone?: string | null
+  avatarUrl?: string | null
+  connected?: boolean
+}
+
+export interface AuthUserResponse {
+  id: number
+  displayName: string
+  email?: string | null
+  preferredAuthProvider?: string | null
+  providers: AuthIdentityResponse[]
+}
+
+export interface AuthBootstrapResponse {
+  success: boolean
+  providers: {
+    yandex: AuthProviderConfig
+    vk: AuthProviderConfig
+  }
+  auth: {
+    authenticated: boolean
+    user: AuthUserResponse | null
+  }
+}

@@ -6,7 +6,7 @@ import router from './router'
 import './assets/main.css'
 import './assets/app.css'
 
-const CACHE_RESET_VERSION = '2026-03-14-vps-ai-capability-fix-1'
+const CACHE_RESET_VERSION = '2026-04-03-restore-portable-auth-sync-1'
 const CACHE_RESET_KEY = 'familyone_cache_reset_version'
 
 async function resetPwaCacheIfNeeded(): Promise<boolean> {

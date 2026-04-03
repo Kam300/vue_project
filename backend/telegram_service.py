@@ -199,6 +199,13 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH_BYTES
 CORS(app, resources={r'/*': {'origins': CORS_ORIGINS}})
 
+try:
+    from sql_api_v2 import register_sql_api_v2
+
+    register_sql_api_v2(app, base_dir=BASE_DIR, logger=logger)
+except Exception as exc:
+    logger.warning("SQL API v2 routes are unavailable: %s", exc)
+
 
 def make_response_json(data, status=200):
     """

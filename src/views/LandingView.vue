@@ -1,157 +1,213 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import LandingPage from '@/components/LandingPage.vue'
+import SyncProgress from '@/components/shared/SyncProgress.vue'
+import { connectPortableIdentityAndSync } from '@/services/portableIdentitySync'
 import { useAppStore } from '@/stores/appStore'
-import { ensureGoogleIdentityLoaded, getGoogleClientId, signInWithGooglePopup } from '@/services/googleIdentity'
 
 const appStore = useAppStore()
 const router = useRouter()
 
-const authBusy = ref(false)
+const authBusy = ref<'yandex' | 'vk' | ''>('')
 const authError = ref('')
 const authStatus = ref('')
+const authProgress = ref(0)
+const authProgressLabel = ref('')
+const authReady = ref(false)
+const authInitBusy = ref(false)
 
-const hasGoogleClientId = computed(() => Boolean(getGoogleClientId()))
-const isAuthorized = computed(() => Boolean(appStore.googleIdToken))
+const yandexConfigured = computed(() => Boolean(appStore.authProviders?.yandex?.configured))
+const vkConfigured = computed(() => Boolean(appStore.authProviders?.vk?.configured))
+const hasPortableIdentity = computed(() => Boolean(appStore.portableIdentity))
+const portableIdentityTitle = computed(() => {
+  if (!appStore.portableIdentity) return ''
+  return appStore.portableIdentity.provider === 'yandex' ? 'Яндекс ID подключен' : 'VK ID подключён'
+})
+const portableIdentityName = computed(
+  () => appStore.portableIdentity?.displayName || appStore.authUser?.displayName || ''
+)
 
-async function signInGoogleFromLanding(): Promise<void> {
+async function ensureLandingAuthReady(): Promise<void> {
+  if (authReady.value || authInitBusy.value) return
+
+  authInitBusy.value = true
   authError.value = ''
-  authStatus.value = ''
-
-  if (!hasGoogleClientId.value) {
-    authError.value = 'Google OAuth не настроен. Укажите VITE_GOOGLE_WEB_CLIENT_ID.'
-    return
-  }
-
-  authBusy.value = true
   try {
-    await ensureGoogleIdentityLoaded()
-    const token = await signInWithGooglePopup()
-    appStore.setGoogleToken(token, 'Google account')
-    authStatus.value = 'Авторизация выполнена. Можно делать backup и восстановление.'
-    await router.push('/app/backup')
+    if (!appStore.initialized) {
+      await appStore.init()
+    } else if (!appStore.authProviders) {
+      await appStore.refreshAuthState()
+    }
+    authReady.value = true
   } catch (reason) {
-    authError.value = `Вход не выполнен: ${(reason as Error).message || 'Unknown error'}`
+    authError.value = `Не удалось подготовить вход: ${(reason as Error).message || 'unknown error'}`
   } finally {
-    authBusy.value = false
+    authInitBusy.value = false
   }
 }
+
+async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void> {
+  await ensureLandingAuthReady()
+  if (!authReady.value) return
+
+  authBusy.value = provider
+  authError.value = ''
+  authStatus.value = ''
+  authProgress.value = 0
+  authProgressLabel.value = 'Подготовка…'
+
+  try {
+    authStatus.value = await connectPortableIdentityAndSync(provider, {
+      onProgress(step) {
+        authProgress.value = step.progress
+        authProgressLabel.value = step.message
+      }
+    })
+    await router.push('/app/backup')
+  } catch (reason) {
+    authError.value = `Не удалось завершить вход: ${(reason as Error).message || 'unknown error'}`
+  } finally {
+    authBusy.value = ''
+  }
+}
+
+onMounted(() => {
+  void ensureLandingAuthReady()
+})
 </script>
 
 <template>
   <div class="landing-wrap">
     <LandingPage />
 
-    <button
-      v-if="!isAuthorized"
-      class="google-auth-btn"
-      @click="signInGoogleFromLanding"
-      :disabled="authBusy || !hasGoogleClientId"
-    >
-      <span class="google-mark">G</span>
-      {{
-        authBusy ? 'Авторизация...' : 'Авторизоваться для backup'
-      }}
-    </button>
+    <aside class="portable-auth-box">
+      <p class="portable-auth-title">Подключите вход для переноса backup между устройствами</p>
+      <p v-if="authInitBusy" class="portable-auth-hint">Проверяем доступные способы входа…</p>
+      <p v-else-if="hasPortableIdentity" class="portable-auth-status ok">
+        {{ portableIdentityTitle }}
+        <span v-if="portableIdentityName">{{ portableIdentityName }}</span>
+      </p>
 
-    <p v-if="authStatus" class="auth-state ok">{{ authStatus }}</p>
-    <p v-else-if="authError" class="auth-state err">{{ authError }}</p>
+      <div class="portable-auth-actions">
+        <button
+          class="portable-auth-btn"
+          @click="connectPortableIdentity('yandex')"
+          :disabled="authInitBusy || Boolean(authBusy) || !yandexConfigured"
+        >
+          {{ authBusy === 'yandex' ? 'Подключение…' : 'Подключить Яндекс ID' }}
+        </button>
+        <button
+          class="portable-auth-btn secondary"
+          @click="connectPortableIdentity('vk')"
+          :disabled="authInitBusy || Boolean(authBusy) || !vkConfigured"
+        >
+          {{ authBusy === 'vk' ? 'Подключение…' : 'Подключить VK ID' }}
+        </button>
+      </div>
+
+      <SyncProgress
+        :visible="Boolean(authBusy)"
+        :progress="authProgress"
+        :label="authProgressLabel"
+      />
+
+      <p v-if="authStatus" class="portable-auth-status ok">{{ authStatus }}</p>
+      <p v-if="authError" class="portable-auth-status err">{{ authError }}</p>
+    </aside>
 
     <a class="apk-download-btn" href="/app-debug.apk" download="app-debug.apk">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-        <rect x="7" y="2" width="10" height="20" rx="2" />
-        <line x1="12" y1="18" x2="12.01" y2="18" />
-      </svg>
       Скачать Android APK
     </a>
 
     <RouterLink class="open-app-btn" to="/app/members">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-        <rect x="3" y="3" width="7" height="7" rx="1" />
-        <rect x="14" y="3" width="7" height="7" rx="1" />
-        <rect x="3" y="14" width="7" height="7" rx="1" />
-        <rect x="14" y="14" width="7" height="7" rx="1" />
-      </svg>
       Открыть web-приложение
     </RouterLink>
   </div>
 </template>
 
 <style scoped>
-.google-auth-btn {
+.portable-auth-box {
   position: fixed;
   right: 16px;
-  bottom: 140px;
+  bottom: 132px;
   z-index: 320;
-  text-decoration: none;
-  border-radius: 999px;
+  width: min(420px, calc(100vw - 32px));
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 22px;
   border: 1px solid var(--color-glass-border);
-  padding: 12px 18px;
-  font-size: 0.88rem;
-  font-weight: 600;
-  font-family: var(--font-sans);
-  color: var(--color-text);
   background: color-mix(in srgb, var(--color-bg-alt) 92%, transparent);
-  backdrop-filter: blur(12px);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  transition: all var(--transition-normal);
-  cursor: pointer;
+  backdrop-filter: blur(18px);
+  box-shadow: var(--shadow-elevated);
 }
 
-.google-auth-btn:hover:not(:disabled) {
-  border-color: rgba(124, 92, 252, 0.45);
-  background: color-mix(in srgb, var(--color-bg-alt) 98%, transparent);
-  transform: translateY(-2px);
+.portable-auth-title {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--color-text);
+  font-weight: 600;
 }
 
-.google-auth-btn:disabled {
-  opacity: 0.65;
-  cursor: not-allowed;
+.portable-auth-hint,
+.portable-auth-status {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
-.google-mark {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: #fff;
-  color: #4285f4;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.85rem;
-  font-weight: 700;
-  line-height: 1;
+.portable-auth-hint {
+  color: var(--color-text-muted);
 }
 
-.auth-state {
-  position: fixed;
-  right: 16px;
-  bottom: 194px;
-  z-index: 320;
-  max-width: min(480px, calc(100vw - 32px));
-  padding: 8px 12px;
-  border-radius: 12px;
-  font-size: 0.8rem;
-  line-height: 1.35;
-  border: 1px solid var(--color-glass-border);
-  background: color-mix(in srgb, var(--color-bg-alt) 94%, transparent);
-}
-
-.auth-state.ok {
+.portable-auth-status.ok {
   color: var(--color-success);
 }
 
-.auth-state.err {
+.portable-auth-status.err {
   color: var(--color-error);
+}
+
+.portable-auth-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.portable-auth-btn {
+  flex: 1 1 180px;
+  min-height: 46px;
+  border-radius: 999px;
+  border: 1px solid var(--color-glass-border);
+  background: color-mix(in srgb, var(--color-surface) 90%, transparent);
+  color: var(--color-text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform var(--transition-normal), border-color var(--transition-normal),
+    background var(--transition-normal);
+}
+
+.portable-auth-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  border-color: rgba(124, 92, 252, 0.45);
+}
+
+.portable-auth-btn.secondary {
+  opacity: 0.92;
+}
+
+.portable-auth-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .apk-download-btn {
   position: fixed;
   right: 16px;
-  bottom: 78px;
+  bottom: 70px;
   z-index: 300;
   text-decoration: none;
   border-radius: 999px;
@@ -163,9 +219,6 @@ async function signInGoogleFromLanding(): Promise<void> {
   color: var(--color-text);
   background: color-mix(in srgb, var(--color-bg-alt) 88%, transparent);
   backdrop-filter: blur(12px);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
   transition: all var(--transition-normal);
 }
 
@@ -190,11 +243,7 @@ async function signInGoogleFromLanding(): Promise<void> {
   color: #fff;
   background: var(--gradient-accent);
   box-shadow: 0 4px 24px rgba(124, 92, 252, 0.4);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
   transition: all var(--transition-normal);
-  animation: pulse-glow 3s ease-in-out infinite;
 }
 
 .open-app-btn:hover {
@@ -204,20 +253,18 @@ async function signInGoogleFromLanding(): Promise<void> {
 }
 
 @media (max-width: 680px) {
-  .google-auth-btn {
+  .portable-auth-box {
     right: 12px;
-    bottom: 122px;
-    padding: 9px 14px;
-    font-size: 0.8rem;
-    gap: 6px;
+    left: 12px;
+    bottom: 116px;
+    width: auto;
+    padding: 14px;
   }
 
   .apk-download-btn {
     right: 12px;
-    bottom: 70px;
-    padding: 9px 14px;
-    font-size: 0.8rem;
-    gap: 6px;
+    bottom: 64px;
+    padding: 10px 16px;
   }
 
   .open-app-btn {
@@ -225,28 +272,6 @@ async function signInGoogleFromLanding(): Promise<void> {
     bottom: 12px;
     padding: 10px 18px;
     font-size: 0.84rem;
-    gap: 6px;
-  }
-
-  .google-mark {
-    width: 17px;
-    height: 17px;
-    font-size: 0.76rem;
-  }
-
-  .auth-state {
-    right: 12px;
-    bottom: 170px;
-    left: auto;
-    max-width: min(280px, calc(100vw - 24px));
-  }
-}
-
-@media (max-width: 400px) {
-  /* На очень узких экранах — только иконка + короткий текст */
-  .google-auth-btn .btn-text::after {
-    content: 'Google';
   }
 }
 </style>
-

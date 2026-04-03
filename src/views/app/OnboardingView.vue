@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { useAppStore } from '@/stores/appStore'
 import logoIcon from '@/assets/icon.png'
 import AppIcon from '@/components/shared/AppIcon.vue'
-import { ensureGoogleIdentityLoaded, getGoogleClientId, signInWithGooglePopup } from '@/services/googleIdentity'
+import SyncProgress from '@/components/shared/SyncProgress.vue'
+import { connectPortableIdentityAndSync } from '@/services/portableIdentitySync'
+import { useAppStore } from '@/stores/appStore'
 
 const appStore = useAppStore()
 const router = useRouter()
@@ -16,37 +17,25 @@ const pin = ref('')
 const pinConfirm = ref('')
 const error = ref('')
 const direction = ref<'next' | 'prev'>('next')
-const authBusy = ref(false)
+const authBusy = ref<'yandex' | 'vk' | ''>('')
 const authError = ref('')
+const authStatus = ref('')
+const authProgress = ref(0)
+const authProgressLabel = ref('')
 const privacyContactUrl = 'https://t.me/TotalC0de'
+
 const privacyPolicyItems = [
   {
-    title: 'Какие данные обрабатываются',
-    text: 'Приложение хранит только те данные, которые вы добавляете сами: ФИО, даты, семейные связи, фотографии и контактные данные членов семьи.'
-  },
-  {
-    title: 'Где хранятся данные',
-    text: 'По умолчанию данные хранятся локально на вашем устройстве.'
+    title: 'Кратко о данных',
+    text: 'В SQL-базе и локальном хранилище сохраняются профили людей, связи, фото, резервные копии и журнал действий.'
   },
   {
     title: 'Когда используется сервер',
-    text: 'Сервер используется только по вашему действию: для распознавания лиц, генерации PDF и серверного backup/restore.'
+    text: 'Сервер используется для резервного копирования, синхронизации между устройствами, PDF и AI-функций.'
   },
   {
-    title: 'Резервное копирование',
-    text: 'Доступны локальный экспорт/импорт и серверный backup. Серверный backup запускается только после авторизации и явного подтверждения.'
-  },
-  {
-    title: 'Передача данных третьим лицам',
-    text: 'Приложение не передает данные третьим лицам без вашего прямого действия.'
-  },
-  {
-    title: 'Управление и удаление',
-    text: 'Вы можете в любой момент удалить членов семьи и связанные фотографии как локально, так и на сервере через функции очистки.'
-  },
-  {
-    title: 'Изменения политики',
-    text: 'Политика может обновляться. Актуальная версия всегда доступна в приложении.'
+    title: 'Перенос между устройствами',
+    text: 'Для переноса backup между ПК и телефоном можно подключить Яндекс ID или VK ID.'
   }
 ]
 
@@ -54,24 +43,25 @@ const pages = [
   {
     icon: 'waving_hand',
     title: 'Добро пожаловать в FamilyOne Web',
-    text: 'Приложение хранит данные локально в браузере и работает как PWA. Ваши данные — только ваши.'
+    text: 'Приложение хранит данные локально в браузере и умеет переносить backup между устройствами.'
   },
   {
     icon: 'lock',
-    title: 'Приватность и безопасность',
-    text: 'Вы полностью управляете данными семьи: экспорт, backup, удаление и перенос — всё в ваших руках.'
+    title: 'Приватность и резервирование',
+    text: 'Вы управляете своими данными сами: экспорт, серверный backup, перенос и удаление доступны в приложении.'
   },
   {
     icon: 'shield',
     title: 'Опциональная блокировка',
-    text: 'Можно включить PIN-экран для защиты доступа на этом устройстве.'
+    text: 'Можно включить локальную блокировку по PIN для защиты доступа на этом устройстве.'
   }
 ]
 
 const isLast = computed(() => page.value === pages.length - 1)
 const progress = computed(() => ((page.value + 1) / pages.length) * 100)
-const hasGoogleClientId = computed(() => Boolean(getGoogleClientId()))
-const isAuthorized = computed(() => Boolean(appStore.googleIdToken))
+const yandexConfigured = computed(() => Boolean(appStore.authProviders?.yandex?.configured))
+const vkConfigured = computed(() => Boolean(appStore.authProviders?.vk?.configured))
+const hasPortableIdentity = computed(() => Boolean(appStore.portableIdentity))
 
 async function nextPage(): Promise<void> {
   error.value = ''
@@ -111,27 +101,27 @@ function prevPage(): void {
   page.value = Math.max(0, page.value - 1)
 }
 
-async function signInGoogleOnboarding(): Promise<void> {
+async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void> {
+  authBusy.value = provider
   authError.value = ''
+  authStatus.value = ''
+  authProgress.value = 0
+  authProgressLabel.value = 'Подготовка…'
 
-  if (!hasGoogleClientId.value) {
-    authError.value = 'Google OAuth не настроен. Укажите VITE_GOOGLE_WEB_CLIENT_ID.'
-    return
-  }
-
-  authBusy.value = true
   try {
-    await ensureGoogleIdentityLoaded()
-    const token = await signInWithGooglePopup()
-    appStore.setGoogleToken(token, 'Google account')
+    authStatus.value = await connectPortableIdentityAndSync(provider, {
+      onProgress(step) {
+        authProgress.value = step.progress
+        authProgressLabel.value = step.message
+      }
+    })
+    await appStore.refreshAuthState()
   } catch (reason) {
-    authError.value = `Вход не выполнен: ${(reason as Error).message || 'Unknown error'}`
+    authError.value = `Не удалось завершить вход: ${(reason as Error).message || 'unknown error'}`
   } finally {
-    authBusy.value = false
+    authBusy.value = ''
   }
 }
-
-
 </script>
 
 <template>
@@ -142,7 +132,6 @@ async function signInGoogleOnboarding(): Promise<void> {
         <span>FamilyOne</span>
       </div>
 
-      <!-- Progress bar -->
       <div class="progress-bar onboarding-progress">
         <div class="progress-bar-fill" :style="{ width: progress + '%' }"></div>
       </div>
@@ -173,8 +162,9 @@ async function signInGoogleOnboarding(): Promise<void> {
             <span class="toggle-track"></span>
             <span>Я принимаю политику конфиденциальности</span>
           </label>
+
           <div class="policy-text">
-            <p class="policy-heading">Политика конфиденциальности FamilyOne</p>
+            <p class="policy-heading">Семейное древо — FamilyOne</p>
             <ol class="policy-list">
               <li v-for="item in privacyPolicyItems" :key="item.title">
                 <strong>{{ item.title }}</strong>
@@ -189,34 +179,45 @@ async function signInGoogleOnboarding(): Promise<void> {
 
           <div class="backup-auth-block">
             <div class="backup-auth-head">
-              <AppIcon :name="isAuthorized ? 'verified_user' : 'backup'" :size="18" />
-              <span>Google backup (необязательно)</span>
+              <AppIcon :name="hasPortableIdentity ? 'verified_user' : 'cloud'" :size="18" />
+              <span>Перенос между устройствами</span>
             </div>
 
             <p class="backup-auth-text">
-              Можно подключить Google сейчас для облачного резервирования и восстановления. Либо нажать «Далее» и настроить позже в разделе «Резерв».
+              Этот шаг необязателен. Можно подключить внешний вход сейчас или сделать это позже в разделе
+              «Резервные копии».
             </p>
 
-            <button
-              class="btn-action primary"
-              @click="signInGoogleOnboarding"
-              :disabled="authBusy || isAuthorized || !hasGoogleClientId"
-              style="align-self: flex-start; margin-top: 4px;"
-            >
-              <svg v-if="!authBusy" width="16" height="16" viewBox="0 0 48 48" style="flex-shrink:0">
-                <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-                <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-                <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
-                <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
-                <path fill="none" d="M0 0h48v48H0z"/>
-              </svg>
-              <AppIcon v-else name="hourglass_top" :size="16" />
-              {{ authBusy ? 'Авторизация...' : 'Войти через Google' }}
-            </button>
+            <div class="btn-row backup-auth-actions">
+              <button
+                class="btn-action primary"
+                @click="connectPortableIdentity('yandex')"
+                :disabled="authBusy !== '' || !yandexConfigured"
+              >
+                {{ authBusy === 'yandex' ? 'Подключение…' : 'Подключить Яндекс ID' }}
+              </button>
+              <button
+                class="btn-action"
+                @click="connectPortableIdentity('vk')"
+                :disabled="authBusy !== '' || !vkConfigured"
+              >
+                {{ authBusy === 'vk' ? 'Подключение…' : 'Подключить VK ID' }}
+              </button>
+            </div>
 
-            <p v-if="isAuthorized" class="backup-auth-status ok">
-              Google подключен. Повторный вход не требуется.
+            <SyncProgress
+              :visible="Boolean(authBusy)"
+              :progress="authProgress"
+              :label="authProgressLabel"
+            />
+
+            <p v-if="hasPortableIdentity" class="backup-auth-status ok">
+              Переносимая учётная запись уже подключена.
             </p>
+            <p v-else class="backup-auth-status muted">
+              Можно пропустить этот шаг и подключить вход позже.
+            </p>
+            <p v-if="authStatus" class="backup-auth-status ok">{{ authStatus }}</p>
             <p v-if="authError" class="backup-auth-status err">{{ authError }}</p>
           </div>
         </div>
@@ -289,7 +290,6 @@ async function signInGoogleOnboarding(): Promise<void> {
   border-radius: 50%;
   object-fit: cover;
   border: 1px solid var(--color-glass-border);
-  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.18);
 }
 
 .onboarding-progress {
@@ -320,12 +320,11 @@ async function signInGoogleOnboarding(): Promise<void> {
 
 .step-dot.active {
   background: var(--gradient-accent);
-  box-shadow: 0 0 10px rgba(124, 92, 252, 0.3);
 }
 
 .step-dot.done {
   background: var(--color-accent);
-  opacity: 0.5;
+  opacity: 0.45;
 }
 
 .step-content {
@@ -334,9 +333,7 @@ async function signInGoogleOnboarding(): Promise<void> {
 
 .step-icon {
   display: block;
-  font-size: 3rem;
   margin-bottom: 16px;
-  line-height: 1;
 }
 
 .step-content h2 {
@@ -365,8 +362,6 @@ async function signInGoogleOnboarding(): Promise<void> {
   color: var(--color-text-secondary);
   font-size: 0.85rem;
   line-height: 1.6;
-  max-height: 260px;
-  overflow: auto;
 }
 
 .policy-heading {
@@ -383,10 +378,6 @@ async function signInGoogleOnboarding(): Promise<void> {
   gap: 8px;
 }
 
-.policy-list li {
-  color: var(--color-text-secondary);
-}
-
 .policy-list li strong {
   display: block;
   color: var(--color-text);
@@ -394,26 +385,13 @@ async function signInGoogleOnboarding(): Promise<void> {
   font-weight: 600;
 }
 
-.policy-list li span {
-  display: block;
-  font-size: 0.82rem;
-  line-height: 1.45;
-}
-
 .policy-contact {
   margin: 10px 0 0;
   font-size: 0.82rem;
-  color: var(--color-text-secondary);
 }
 
 .policy-contact a {
   color: var(--color-accent-light);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.policy-contact a:hover {
-  color: var(--color-accent);
 }
 
 .backup-auth-block {
@@ -431,7 +409,6 @@ async function signInGoogleOnboarding(): Promise<void> {
   align-items: center;
   gap: 8px;
   font-weight: 700;
-  color: var(--color-text);
 }
 
 .backup-auth-text {
@@ -439,10 +416,6 @@ async function signInGoogleOnboarding(): Promise<void> {
   color: var(--color-text-secondary);
   font-size: 0.84rem;
   line-height: 1.55;
-}
-
-.backup-auth-actions {
-  margin-top: 4px;
 }
 
 .backup-auth-actions .btn-action {
@@ -467,6 +440,26 @@ async function signInGoogleOnboarding(): Promise<void> {
   color: var(--color-error);
 }
 
+.form-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+}
+
+.field input {
+  min-height: 46px;
+  border-radius: 14px;
+  border: 1px solid var(--color-glass-border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--color-text);
+  padding: 0 14px;
+  font: inherit;
+}
+
 .onboarding-actions {
   margin-top: 24px;
   justify-content: space-between;
@@ -478,7 +471,6 @@ async function signInGoogleOnboarding(): Promise<void> {
   margin-top: 8px;
 }
 
-/* Slide transitions */
 .slide-right-enter-active,
 .slide-right-leave-active,
 .slide-left-enter-active,
@@ -504,13 +496,6 @@ async function signInGoogleOnboarding(): Promise<void> {
 .slide-left-leave-to {
   opacity: 0;
   transform: translateX(30px);
-}
-
-@media (max-width: 860px) {
-  .onboarding-page {
-    padding-top: 118px;
-    padding-bottom: 88px;
-  }
 }
 
 @media (max-width: 480px) {

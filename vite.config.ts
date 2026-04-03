@@ -13,7 +13,7 @@ export default defineConfig({
       includeAssets: ['icon.png'],
       manifest: {
         id: '/app',
-        name: 'FamilyOne',
+        name: 'Семейное древо — FamilyOne',
         short_name: 'FamilyOne',
         description: 'FamilyOne web-приложение для семейного древа',
         theme_color: '#0b0e17',
@@ -42,6 +42,7 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: '/index.html',
+        navigateFallbackDenylist: [/^\/api\//],
         cleanupOutdatedCaches: true,
         clientsClaim: true,
         skipWaiting: true,

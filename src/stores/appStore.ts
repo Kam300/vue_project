@@ -1,14 +1,13 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
+import type { AuthBootstrapResponse, AuthIdentityResponse } from '@/types/api'
 import type { AppSettingsState } from '@/types/models'
 import { DEFAULT_APP_SETTINGS, getAppSettings, patchAppSettings } from '@/db/repositories'
-import { setApiBaseUrl } from '@/services/api'
+import { authBootstrap, setApiBaseUrl } from '@/services/api'
 import { sha256FromString } from '@/utils/crypto'
 
 const SESSION_STORAGE_KEYS = {
-  lockUnlocked: 'familyone_lock_unlocked',
-  googleToken: 'familyone_google_token',
-  googleAccountLabel: 'familyone_google_account_label'
+  lockUnlocked: 'familyone_lock_unlocked'
 } as const
 
 function getSessionStorage(): Storage | null {
@@ -41,7 +40,7 @@ function writeSessionValue(key: string, value: string): void {
     }
     storage.removeItem(key)
   } catch {
-    // ignore storage write failures (private mode, blocked storage)
+    // ignore storage write failures
   }
 }
 
@@ -49,8 +48,8 @@ export const useAppStore = defineStore('app', () => {
   const settings = ref<AppSettingsState>({ ...DEFAULT_APP_SETTINGS })
   const initialized = ref(false)
   const sessionUnlocked = ref(false)
-  const googleIdToken = ref('')
-  const googleAccountLabel = ref('')
+  const authProviders = ref<AuthBootstrapResponse['providers'] | null>(null)
+  const authUser = ref<AuthBootstrapResponse['auth']['user']>(null)
 
   const requiresOnboarding = computed(
     () => !settings.value.onboardingCompleted || !settings.value.privacyConsented
@@ -58,6 +57,10 @@ export const useAppStore = defineStore('app', () => {
   const requiresLock = computed(
     () => settings.value.pinEnabled && settings.value.appLockBySession && !sessionUnlocked.value
   )
+  const portableIdentity = computed<AuthIdentityResponse | null>(() => {
+    const providers = authUser.value?.providers || []
+    return providers.find((provider) => provider.provider !== 'local') || null
+  })
 
   function applyTheme(theme: AppSettingsState['theme']): void {
     const root = document.documentElement
@@ -76,17 +79,27 @@ export const useAppStore = defineStore('app', () => {
     writeSessionValue(SESSION_STORAGE_KEYS.lockUnlocked, sessionUnlocked.value ? '1' : '')
   }
 
-  function syncGoogleSessionStorage(): void {
-    writeSessionValue(SESSION_STORAGE_KEYS.googleToken, googleIdToken.value)
-    writeSessionValue(SESSION_STORAGE_KEYS.googleAccountLabel, googleAccountLabel.value)
+  async function refreshAuthState(displayName = 'FamilyOne Web'): Promise<AuthBootstrapResponse | null> {
+    const deviceId = String(settings.value.deviceId || '').trim()
+    if (!deviceId) {
+      authProviders.value = null
+      authUser.value = null
+      return null
+    }
+
+    const snapshot = await authBootstrap({
+      deviceId,
+      displayName
+    })
+    authProviders.value = snapshot.providers
+    authUser.value = snapshot.auth.user
+    return snapshot
   }
 
   async function init(): Promise<void> {
     settings.value = await getAppSettings()
     setApiBaseUrl(settings.value.apiBaseUrl || DEFAULT_APP_SETTINGS.apiBaseUrl)
     applyTheme(settings.value.theme)
-    googleIdToken.value = readSessionValue(SESSION_STORAGE_KEYS.googleToken)
-    googleAccountLabel.value = readSessionValue(SESSION_STORAGE_KEYS.googleAccountLabel)
 
     if (!settings.value.pinEnabled || !settings.value.appLockBySession) {
       sessionUnlocked.value = true
@@ -96,6 +109,13 @@ export const useAppStore = defineStore('app', () => {
     }
 
     initialized.value = true
+
+    try {
+      await refreshAuthState()
+    } catch {
+      authProviders.value = null
+      authUser.value = null
+    }
   }
 
   async function updateSettings(patch: Partial<AppSettingsState>): Promise<void> {
@@ -152,34 +172,22 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  function setGoogleToken(token: string, accountLabel = ''): void {
-    googleIdToken.value = String(token || '').trim()
-    googleAccountLabel.value = accountLabel
-    syncGoogleSessionStorage()
-  }
-
-  function clearGoogleToken(): void {
-    googleIdToken.value = ''
-    googleAccountLabel.value = ''
-    syncGoogleSessionStorage()
-  }
-
   return {
     settings,
     initialized,
     sessionUnlocked,
     requiresOnboarding,
     requiresLock,
-    googleIdToken,
-    googleAccountLabel,
+    authProviders,
+    authUser,
+    portableIdentity,
     init,
+    refreshAuthState,
     updateSettings,
     completeOnboarding,
     setPin,
     setPinToggle,
     verifyPin,
-    lockSession,
-    setGoogleToken,
-    clearGoogleToken
+    lockSession
   }
 })

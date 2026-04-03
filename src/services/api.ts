@@ -1,4 +1,5 @@
 import type {
+  AuthBootstrapResponse,
   BackupMetaResponse,
   GeneratePdfResponse,
   HealthResponse,
@@ -61,9 +62,22 @@ async function request<T>(
   const response = await fetch(`${apiBase}${endpoint}`, {
     method,
     body: options.body,
-    headers: options.headers
+    headers: options.headers,
+    credentials: 'same-origin'
   })
   return parseResponse<T>(response)
+}
+
+function buildDeviceHeaders(authToken = '', deviceId?: string | number): Record<string, string> {
+  const headers: Record<string, string> = {}
+  const normalizedToken = String(authToken || '').trim()
+  if (normalizedToken) {
+    headers.Authorization = `Bearer ${normalizedToken}`
+  }
+  if (deviceId !== undefined && deviceId !== null && String(deviceId).trim()) {
+    headers['X-FamilyOne-Device'] = String(deviceId).trim()
+  }
+  return headers
 }
 
 export function healthCheck(): Promise<HealthResponse> {
@@ -129,21 +143,38 @@ export function buildPdfDownloadUrl(driveId: string): string {
   return `${apiBase}/download_pdf/${encodeURIComponent(driveId)}`
 }
 
-function buildBackupHeaders(authToken = '', deviceId?: string | number): Record<string, string> {
-  const headers: Record<string, string> = {}
-  const normalizedToken = String(authToken || '').trim()
-  if (normalizedToken) {
-    headers.Authorization = `Bearer ${normalizedToken}`
-  }
-  if (deviceId !== undefined && deviceId !== null && String(deviceId).trim()) {
-    headers['X-FamilyOne-Device'] = String(deviceId).trim()
-  }
-  return headers
+export function authBootstrap(payload: {
+  deviceId: string | number
+  displayName?: string
+}): Promise<AuthBootstrapResponse> {
+  return request<AuthBootstrapResponse>('/v2/auth/bootstrap', 'POST', {
+    body: JSON.stringify(payload),
+    headers: {
+      'Content-Type': 'application/json',
+      ...buildDeviceHeaders('', payload.deviceId)
+    }
+  })
+}
+
+export function authProviders(): Promise<AuthBootstrapResponse['providers']> {
+  return request<{ success: boolean; providers: AuthBootstrapResponse['providers'] }>('/v2/auth/providers').then(
+    (response) => response.providers
+  )
+}
+
+export function authMe(deviceId?: string | number): Promise<AuthBootstrapResponse> {
+  return request<AuthBootstrapResponse>('/v2/auth/me', 'GET', {
+    headers: buildDeviceHeaders('', deviceId)
+  })
+}
+
+export function authLogout(): Promise<{ success: boolean }> {
+  return request<{ success: boolean }>('/v2/auth/logout', 'POST')
 }
 
 export function backupMeta(authToken = '', deviceId?: string | number): Promise<BackupMetaResponse> {
-  return request<BackupMetaResponse>('/backup/meta', 'GET', {
-    headers: buildBackupHeaders(authToken, deviceId)
+  return request<BackupMetaResponse>('/v2/backup/meta', 'GET', {
+    headers: buildDeviceHeaders(authToken, deviceId)
   })
 }
 
@@ -154,15 +185,16 @@ export function backupUpload(
 ): Promise<BackupMetaResponse> {
   const formData = new FormData()
   formData.append('backup_file', zipFile, 'familyone_backup.zip')
-  return request<BackupMetaResponse>('/backup/upload', 'POST', {
+  return request<BackupMetaResponse>('/v2/backup/upload', 'POST', {
     body: formData,
-    headers: buildBackupHeaders(authToken, deviceId)
+    headers: buildDeviceHeaders(authToken, deviceId)
   })
 }
 
 export async function backupDownload(authToken = '', deviceId?: string | number): Promise<Blob> {
-  const response = await fetch(`${apiBase}/backup/download`, {
-    headers: buildBackupHeaders(authToken, deviceId)
+  const response = await fetch(`${apiBase}/v2/backup/download`, {
+    headers: buildDeviceHeaders(authToken, deviceId),
+    credentials: 'same-origin'
   })
   if (!response.ok) {
     const text = await response.text()
@@ -176,7 +208,7 @@ export function backupDelete(authToken = '', deviceId?: string | number): Promis
   schemaVersion: number
   deleted: boolean
 }> {
-  return request('/backup', 'DELETE', {
-    headers: buildBackupHeaders(authToken, deviceId)
+  return request('/v2/backup', 'DELETE', {
+    headers: buildDeviceHeaders(authToken, deviceId)
   })
 }
