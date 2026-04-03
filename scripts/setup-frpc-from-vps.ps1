@@ -71,12 +71,46 @@ function Get-FrpTokenFromVps {
     $runner = if ($User.ToLowerInvariant() -eq 'root') { 'sh' } else { 'sudo sh' }
     $remoteCommand = @"
 $runner -lc '
-if [ ! -f /etc/frp/frps.toml ]; then
+config_path=""
+for candidate in \
+  /etc/frp/frps.toml \
+  /etc/frps.toml \
+  /usr/local/etc/frp/frps.toml \
+  /etc/frp/frps.ini \
+  /etc/frps.ini \
+  /usr/local/etc/frp/frps.ini
+do
+  if [ -f "`$candidate" ]; then
+    config_path="`$candidate"
+    break
+  fi
+done
+
+if [ -z "`$config_path" ]; then
+  config_path=`$(systemctl show -p ExecStart frps 2>/dev/null | sed -n "s/.* -c \([^ ;\"]*\).*/\1/p" | head -n 1)
+fi
+
+if [ -z "`$config_path" ] || [ ! -f "`$config_path" ]; then
+  config_path=`$(find /etc /usr/local/etc /opt /root -maxdepth 4 -type f \( -name frps.toml -o -name frps.ini \) 2>/dev/null | head -n 1)
+fi
+
+if [ -z "`$config_path" ] || [ ! -f "`$config_path" ]; then
   echo "__FRPS_MISSING__"
   exit 0
 fi
 
-token_value=`$(awk -F '"' '/^[[:space:]]*token[[:space:]]*=/{print `$2; exit}' /etc/frp/frps.toml)
+token_value=`$(awk '
+/^[[:space:]]*(auth\.)?token[[:space:]]*=/ {
+  line=`$0
+  sub(/^[[:space:]]*(auth\.)?token[[:space:]]*=[[:space:]]*/, "", line)
+  sub(/[[:space:]]*[#;].*$/, "", line)
+  gsub(/^"/, "", line)
+  gsub(/"$/, "", line)
+  gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+  print line
+  exit
+}
+' "`$config_path")
 if [ -z "`$token_value" ]; then
   echo "__TOKEN_MISSING__"
 else
@@ -110,11 +144,11 @@ fi
     }
 
     if ($value -eq '__FRPS_MISSING__') {
-        throw "File /etc/frp/frps.toml was not found on VPS. Run FRP server setup there first."
+        throw "FRPS config was not found on VPS. Run FRP server setup there first."
     }
 
     if ($value -eq '__TOKEN_MISSING__') {
-        throw "Token entry was not found in /etc/frp/frps.toml."
+        throw "Token entry was not found in the FRPS config on VPS."
     }
 
     return $value

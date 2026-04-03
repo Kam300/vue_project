@@ -6,6 +6,7 @@ import json
 import locale
 import os
 import queue
+import shlex
 import socket
 import subprocess
 import sys
@@ -29,7 +30,7 @@ except ImportError:
 
 APP_TITLE = "FamilyOne: настройка сервера на ПК"
 DEFAULTS = {
-    "vps_host": "144.31.53.179",
+    "vps_host": "",
     "vps_user": "root",
     "ssh_port": "22",
     "domain": "totalcode.online",
@@ -41,6 +42,88 @@ DEFAULTS = {
     "start_after_setup": True,
     "check_public_health": True,
 }
+
+HELP_VPS_MIGRATION_TEXT = """Переезд на другой VPS
+
+1. Подготовьте новый VPS.
+   Нужен Ubuntu/Debian-сервер с белым IP и доступом по SSH.
+   На сервере должны быть открыты порты 22, 80, 443 и 7000.
+
+2. Обновите DNS домена.
+   Для домена нужно перевести A-запись @ на IP нового VPS.
+   Если есть www, оставьте CNAME www -> ваш_домен.
+   После смены DNS локальный кэш Windows может еще показывать старый IP.
+   Если в журнале виден старый адрес, выполните ipconfig /flushdns и повторите проверку.
+   Если смена DNS была совсем недавно, временно снимите галочку
+   "Проверять внешний HTTPS после действий" и повторите внешнюю проверку позже.
+
+3. Откройте этот мастер на текущем ПК.
+   В поле "Хост VPS" укажите новый IP или новый DNS-адрес сервера.
+   В поле "IP сервера" обычно указывается тот же адрес, что и в "Хост VPS".
+   Это адрес, к которому подключается локальный frpc.
+   Если оставить "IP сервера" пустым, мастер сам подставит "Хост VPS".
+
+4. Получите новый FRP токен.
+   Нажмите "Получить токен".
+   Если на новом VPS еще нет frps/caddy, мастер сам попытается настроить их по SSH.
+   После этого токен будет считан с нового сервера и сохранен в поле "FRP токен".
+
+5. Перенастройте текущий ПК на новый VPS.
+   Нажмите "Настроить этот ПК".
+   Мастер перепишет C:\\frp\\frpc.toml на новый IP и новый токен.
+
+6. При необходимости включите автозапуск.
+   Нажмите "Включить автозапуск VPS", чтобы включить frps и caddy на новом сервере.
+   Нажмите "Включить автозапуск ПК", если нужно автоматически запускать стек на Windows.
+
+7. Проверьте запуск.
+   Нажмите "Запустить сервер", затем "Проверка здоровья".
+   Убедитесь, что локальные URL отвечают и внешний HTTPS открывается уже через новый VPS.
+
+8. После успешной миграции отключите старый VPS.
+   Когда новый сервер уже работает, можно остановить frps/caddy на старом VPS
+   или удалить старые правила/службы, чтобы не путаться в дальнейшем.
+"""
+
+HELP_PC_CHANGE_TEXT = """Смена ПК
+
+1. Скопируйте проект на новый компьютер.
+   Лучше переносить всю папку vue_project целиком.
+   Так вы сохраните backend/.env, базу данных, runtime-файлы и скрипты в одном месте.
+
+2. На старом ПК остановите сервер.
+   Нажмите "Остановить сервер" или выполните .\\stop-server.ps1,
+   чтобы одновременно не работали два одинаковых экземпляра.
+
+3. Откройте мастер на новом ПК.
+   Укажите текущий "Хост VPS", пользователя, пароль и домен.
+   Поле "IP сервера" обычно совпадает с "Хост VPS".
+   "FRP токен" можно оставить пустым, если хотите получить его автоматически.
+
+4. Используйте "Полная настройка".
+   Для нового ПК это основной сценарий.
+   Мастер проверит VPS, получит токен, настроит frpc, включит автозапуск,
+   запустит локальный стек и выполнит проверки.
+
+5. Если нужна ручная последовательность, используйте шаги отдельно.
+   Сначала "Получить токен".
+   Затем "Настроить этот ПК".
+   Потом "Включить автозапуск ПК".
+   После этого "Запустить сервер" и "Проверка здоровья".
+
+6. Проверьте внешний доступ.
+   Убедитесь, что https://ваш_домен/ и https://ваш_домен/api/health отвечают с нового ПК.
+
+7. После успешной проверки отключите старый ПК.
+   Остановите сервер на старом компьютере и отключите там автозапуск,
+   чтобы запросы шли только через новый рабочий ПК.
+
+8. Если домен указывает на старый IP, это не проблема нового ПК.
+   Сначала обновите DNS домена на нужный VPS и очистите локальный DNS-кэш Windows,
+   если журнал продолжает показывать старый адрес.
+   Если DNS только что меняли, можно временно снять галочку
+   "Проверять внешний HTTPS после действий" и закончить локальную настройку без внешней проверки.
+"""
 
 
 def resolve_project_root() -> Path:
@@ -84,12 +167,14 @@ class SetupUi(tk.Tk):
         self.output_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.busy = False
         self.paramiko_module = None
+        self.help_window: tk.Toplevel | None = None
         self.action_buttons: list[ttk.Button] = []
 
         self.vars: dict[str, tk.Variable] = {}
         self._init_vars()
         self._build_ui()
         self._load_settings()
+        self.bind("<F1>", lambda event: self._show_help_window())
         self.after(120, self._drain_output_queue)
 
         self._set_status("Готово")
@@ -215,6 +300,12 @@ class SetupUi(tk.Tk):
         self._button(actions, "Остановить сервер", self._stop_server, 1, 3)
         self._button(actions, "Проверка здоровья", self._start_health_check, 1, 4)
 
+        ttk.Button(
+            actions,
+            text="Помощь: переезд на VPS / смена ПК",
+            command=self._show_help_window,
+        ).grid(row=2, column=0, columnspan=5, sticky="ew", padx=6, pady=(6, 6))
+
         logs = ttk.LabelFrame(root, text="Журнал")
         logs.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
         logs.columnconfigure(0, weight=1)
@@ -229,6 +320,60 @@ class SetupUi(tk.Tk):
         status_bar.columnconfigure(0, weight=1)
         self.status_var = tk.StringVar(value="")
         ttk.Label(status_bar, textvariable=self.status_var).grid(row=0, column=0, sticky="w")
+
+    def _show_help_window(self) -> None:
+        if self.help_window is not None and self.help_window.winfo_exists():
+            self.help_window.deiconify()
+            self.help_window.lift()
+            self.help_window.focus_force()
+            return
+
+        window = tk.Toplevel(self)
+        self.help_window = window
+        window.title(f"{APP_TITLE} — помощь")
+        window.geometry("920x720")
+        window.minsize(760, 560)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+
+        def on_destroy(event: tk.Event) -> None:
+            if event.widget is window:
+                self.help_window = None
+
+        window.bind("<Destroy>", on_destroy)
+
+        ttk.Label(
+            window,
+            text=(
+                "Пошаговые инструкции для двух частых сценариев. "
+                "Все шаги привязаны к кнопкам этого мастера."
+            ),
+            wraplength=860,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+
+        notebook = ttk.Notebook(window)
+        notebook.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+
+        self._add_help_tab(notebook, "Переезд на VPS", HELP_VPS_MIGRATION_TEXT)
+        self._add_help_tab(notebook, "Смена ПК", HELP_PC_CHANGE_TEXT)
+
+        buttons = ttk.Frame(window)
+        buttons.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
+        buttons.columnconfigure(0, weight=1)
+        ttk.Button(buttons, text="Закрыть", command=window.destroy).grid(row=0, column=1, sticky="e")
+
+    def _add_help_tab(self, notebook: ttk.Notebook, title: str, content: str) -> None:
+        frame = ttk.Frame(notebook, padding=8)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+
+        text = ScrolledText(frame, wrap="word", font=("Segoe UI", 10))
+        text.grid(row=0, column=0, sticky="nsew")
+        text.insert("1.0", content.strip())
+        text.configure(state="disabled")
+
+        notebook.add(frame, text=title)
 
     def _entry(
         self,
@@ -442,6 +587,7 @@ class SetupUi(tk.Tk):
         process = subprocess.Popen(
             args,
             cwd=str(cwd or self.project_root),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -451,13 +597,72 @@ class SetupUi(tk.Tk):
         )
 
         collected: list[str] = []
-        assert process.stdout is not None
-        for raw_line in process.stdout:
-            line = raw_line.rstrip()
-            collected.append(line)
-            self._enqueue_log(line)
+        stdout_done = threading.Event()
+        output_queue: queue.Queue[str] = queue.Queue()
 
-        return_code = process.wait()
+        def pump_stdout() -> None:
+            try:
+                assert process.stdout is not None
+                for raw_line in process.stdout:
+                    output_queue.put(raw_line.rstrip())
+            finally:
+                stdout_done.set()
+
+        threading.Thread(target=pump_stdout, daemon=True).start()
+
+        return_code: int | None = None
+        process_exited_at: float | None = None
+        warned_about_stdout = False
+        detached_stdout = False
+
+        while True:
+            try:
+                while True:
+                    line = output_queue.get_nowait()
+                    collected.append(line)
+                    self._enqueue_log(line)
+            except queue.Empty:
+                pass
+
+            if return_code is None:
+                return_code = process.poll()
+                if return_code is not None:
+                    process_exited_at = time.monotonic()
+
+            if return_code is not None:
+                if stdout_done.wait(timeout=0.2):
+                    break
+
+                assert process_exited_at is not None
+                if time.monotonic() - process_exited_at >= 1.0:
+                    if not warned_about_stdout:
+                        self._enqueue_log(
+                            "Команда уже завершилась, но поток вывода не закрылся сразу. "
+                            "Продолжаю работу без дополнительного ожидания."
+                        )
+                        warned_about_stdout = True
+                    detached_stdout = True
+                    break
+            else:
+                time.sleep(0.1)
+
+        try:
+            while True:
+                line = output_queue.get_nowait()
+                collected.append(line)
+                self._enqueue_log(line)
+        except queue.Empty:
+            pass
+
+        if process.stdout is not None and not detached_stdout:
+            try:
+                process.stdout.close()
+            except Exception:
+                pass
+
+        if return_code is None:
+            return_code = process.wait(timeout=1)
+
         output = "\n".join(collected).strip()
         if return_code != 0:
             raise RuntimeError(f"Команда завершилась с кодом {return_code}.")
@@ -472,6 +677,7 @@ class SetupUi(tk.Tk):
         command = [
             powershell_executable(),
             "-NoProfile",
+            "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
             "-File",
@@ -512,7 +718,7 @@ class SetupUi(tk.Tk):
         self.paramiko_module = importlib.import_module("paramiko")
         return self.paramiko_module
 
-    def _ssh_exec(self, config: dict[str, Any], command: str, timeout: int = 60) -> str:
+    def _open_ssh_client(self, config: dict[str, Any]) -> Any:
         if not config["vps_host"]:
             raise ValueError("Нужно указать хост VPS.")
         if not config["vps_user"]:
@@ -524,16 +730,20 @@ class SetupUi(tk.Tk):
         self._enqueue_log(f"Подключение к {config['vps_user']}@{config['vps_host']}:{config['ssh_port']} ...")
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=config["vps_host"],
+            port=int(config["ssh_port"]),
+            username=config["vps_user"],
+            password=config["vps_password"],
+            timeout=15,
+            auth_timeout=15,
+            banner_timeout=15,
+        )
+        return client
+
+    def _ssh_exec(self, config: dict[str, Any], command: str, timeout: int = 60) -> str:
+        client = self._open_ssh_client(config)
         try:
-            client.connect(
-                hostname=config["vps_host"],
-                port=int(config["ssh_port"]),
-                username=config["vps_user"],
-                password=config["vps_password"],
-                timeout=15,
-                auth_timeout=15,
-                banner_timeout=15,
-            )
             _, stdout, stderr = client.exec_command(command, timeout=timeout)
             out = stdout.read().decode("utf-8", "replace").strip()
             err = stderr.read().decode("utf-8", "replace").strip()
@@ -551,6 +761,60 @@ class SetupUi(tk.Tk):
 
         return out
 
+    def _bootstrap_frps_on_vps(self, config: dict[str, Any]) -> None:
+        vps_user = str(config.get("vps_user", "")).strip().lower()
+        if vps_user != "root":
+            raise RuntimeError(
+                "Автоматическая настройка FRPS на новом VPS поддерживается только для пользователя root."
+            )
+
+        local_script = self.project_root / "infra" / "frp" / "setup-frps.sh"
+        if not local_script.exists():
+            raise RuntimeError(f"Не найден серверный скрипт настройки: {local_script}")
+
+        remote_script = "/root/codex-setup-frps.sh"
+        script_text = local_script.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+        self._enqueue_log("Конфиг FRPS не найден. Настраиваю FRPS и Caddy на новом VPS...")
+        client = self._open_ssh_client(config)
+        try:
+            sftp = client.open_sftp()
+            try:
+                with sftp.open(remote_script, "wb") as remote_file:
+                    remote_file.write(script_text.encode("utf-8"))
+                sftp.chmod(remote_script, 0o755)
+            finally:
+                sftp.close()
+
+            command_parts = [
+                "bash",
+                shlex.quote(remote_script),
+                "--domain",
+                shlex.quote(str(config["domain"]).strip()),
+            ]
+            token = str(config.get("token", "")).strip()
+            if token:
+                command_parts.extend(["--token", shlex.quote(token)])
+
+            remote_command = " ".join(command_parts)
+            self._enqueue_log("Запускаю настройку VPS. Это может занять несколько минут...")
+            _, stdout, stderr = client.exec_command(remote_command, timeout=1800)
+            out = stdout.read().decode("utf-8", "replace").strip()
+            err = stderr.read().decode("utf-8", "replace").strip()
+            exit_code = stdout.channel.recv_exit_status()
+        finally:
+            client.close()
+
+        if out:
+            self._enqueue_log(out)
+        if err:
+            self._enqueue_log(err)
+
+        if exit_code != 0:
+            raise RuntimeError(f"Не удалось настроить FRPS на VPS. Код завершения: {exit_code}.")
+
+        self._enqueue_log("FRPS и Caddy настроены на VPS.")
+
     def _ensure_token(self, config: dict[str, Any]) -> str:
         token = str(config.get("token", "")).strip()
         if token:
@@ -561,18 +825,77 @@ class SetupUi(tk.Tk):
         config["token"] = token
         return token
 
-    def _fetch_token(self, config: dict[str, Any]) -> str:
-        command = (
-            "test -f /etc/frp/frps.toml || { echo __FRPS_MISSING__; exit 0; }; "
-            "awk -F '\"' '/^[[:space:]]*token[[:space:]]*=/{print $2; exit}' /etc/frp/frps.toml"
-        )
+    def _fetch_token(self, config: dict[str, Any], allow_bootstrap: bool = True) -> str:
+        script = """
+config_path=""
+for candidate in \
+  /etc/frp/frps.toml \
+  /etc/frps.toml \
+  /usr/local/etc/frp/frps.toml \
+  /etc/frp/frps.ini \
+  /etc/frps.ini \
+  /usr/local/etc/frp/frps.ini
+do
+  if [ -f "$candidate" ]; then
+    config_path="$candidate"
+    break
+  fi
+done
+
+if [ -z "$config_path" ]; then
+  config_path=$(systemctl show -p ExecStart frps 2>/dev/null | sed -n 's/.* -c \\([^ ;"]*\\).*/\\1/p' | head -n 1)
+fi
+
+if [ -z "$config_path" ] || [ ! -f "$config_path" ]; then
+  config_path=$(find /etc /usr/local/etc /opt /root -maxdepth 4 -type f \\( -name frps.toml -o -name frps.ini \\) 2>/dev/null | head -n 1)
+fi
+
+if [ -z "$config_path" ] || [ ! -f "$config_path" ]; then
+  echo __FRPS_MISSING__
+  exit 0
+fi
+
+printf '__FRPS_PATH__=%s\\n' "$config_path"
+awk '
+/^[[:space:]]*(auth\\.)?token[[:space:]]*=/ {
+  line=$0
+  sub(/^[[:space:]]*(auth\\.)?token[[:space:]]*=[[:space:]]*/, "", line)
+  sub(/[[:space:]]*[#;].*$/, "", line)
+  gsub(/^"/, "", line)
+  gsub(/"$/, "", line)
+  gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+  print line
+  exit
+}
+' "$config_path"
+""".strip()
+        command = f"sh -lc {shlex.quote(script)}"
         output = self._ssh_exec(config, command)
-        token = output.splitlines()[-1].strip() if output else ""
-        if token == "__FRPS_MISSING__":
-            raise RuntimeError("На VPS не найден файл /etc/frp/frps.toml.")
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        config_path = ""
+        token = ""
+
+        for line in lines:
+            if line == "__FRPS_MISSING__":
+                if allow_bootstrap:
+                    self._bootstrap_frps_on_vps(config)
+                    return self._fetch_token(config, allow_bootstrap=False)
+                raise RuntimeError(
+                    "На VPS не найден конфиг FRPS. Проверьте, что frps установлен, "
+                    "а его конфиг доступен в /etc, /usr/local/etc, /opt или /root."
+                )
+            if line.startswith("__FRPS_PATH__="):
+                config_path = line.partition("=")[2].strip()
+                continue
+            token = line
+
         if not token:
-            raise RuntimeError("Не удалось прочитать FRP токен с VPS.")
-        self._enqueue_log("FRP токен получен с VPS.")
+            location_hint = f" из {config_path}" if config_path else ""
+            raise RuntimeError(f"Не удалось прочитать FRP токен{location_hint}.")
+        if config_path:
+            self._enqueue_log(f"FRP токен получен с VPS ({config_path}).")
+        else:
+            self._enqueue_log("FRP токен получен с VPS.")
         return token
 
     def _check_vps(self, config: dict[str, Any]) -> None:
@@ -636,12 +959,36 @@ class SetupUi(tk.Tk):
             self._http_get(url)
 
         if config["check_public_health"]:
+            expected_ip = self._resolve_host_ip(str(config.get("server_ip", "")).strip())
+            if expected_ip:
+                self._enqueue_log(f"Ожидаемый IP VPS: {expected_ip}")
             try:
                 ip = socket.gethostbyname(config["domain"])
                 self._enqueue_log(f"DNS: {config['domain']} -> {ip}")
+                if expected_ip and ip != expected_ip:
+                    raise RuntimeError(
+                        f"Домен {config['domain']} на этом ПК резолвится в {ip}, "
+                        f"а в поле 'IP сервера' указан {expected_ip}. "
+                        "Похоже, локальный DNS-кэш или DNS-сервер всё ещё отдают старый VPS. "
+                        "Выполните 'ipconfig /flushdns' и повторите проверку. "
+                        "Если IP домена меняли совсем недавно, можно временно снять галочку "
+                        "'Проверять внешний HTTPS после действий' и продолжить настройку без внешней проверки."
+                    )
             except Exception as exc:
                 self._enqueue_log(f"Ошибка DNS-проверки: {exc}")
+                if isinstance(exc, RuntimeError):
+                    raise
             self._http_get(f"https://{config['domain']}/api/health")
+
+    def _resolve_host_ip(self, host: str) -> str:
+        candidate = host.strip()
+        if not candidate:
+            return ""
+
+        try:
+            return socket.gethostbyname(candidate)
+        except Exception:
+            return candidate
 
     def _http_get(self, url: str) -> None:
         self._enqueue_log(f"Проверка URL: {url}")
@@ -662,6 +1009,8 @@ class SetupUi(tk.Tk):
         if config["vps_password"]:
             self._enqueue_status("Проверка VPS")
             self._check_vps(config)
+            self._enqueue_status("Получение FRP токена")
+            self._ensure_token(config)
             self._enqueue_status("Включение автозапуска VPS")
             self._enable_vps_autostart(config)
         else:

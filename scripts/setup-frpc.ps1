@@ -21,6 +21,9 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
+$runtimeDir = Join-Path $repoRoot '.runtime'
+
 function Write-Step {
     param([string]$Message)
     Write-Host "==> $Message" -ForegroundColor Yellow
@@ -115,7 +118,15 @@ function Download-FileWithFallback {
     foreach ($url in $Urls) {
         try {
             Write-Step "Download attempt (Invoke-WebRequest): $url"
-            Invoke-WebRequest -Uri $url -OutFile $OutputFile -UseBasicParsing -TimeoutSec 180
+            Invoke-WebRequest `
+                -Uri $url `
+                -OutFile $OutputFile `
+                -UseBasicParsing `
+                -TimeoutSec 180 `
+                -Headers @{
+                    'User-Agent' = 'FamilyOneSetup/1.0'
+                    'Accept' = 'application/octet-stream'
+                }
             if (Test-ZipArchiveFile -Path $OutputFile) {
                 return $url
             }
@@ -128,7 +139,10 @@ function Download-FileWithFallback {
         if (Get-Command 'curl.exe' -ErrorAction SilentlyContinue) {
             try {
                 Write-Step "Download attempt (curl.exe): $url"
-                & curl.exe -L --fail --connect-timeout 20 --max-time 300 -o $OutputFile $url *> $null
+                & curl.exe -L --fail --connect-timeout 20 --max-time 300 `
+                    -H "User-Agent: FamilyOneSetup/1.0" `
+                    -H "Accept: application/octet-stream" `
+                    -o $OutputFile $url *> $null
                 if (($LASTEXITCODE -eq 0) -and (Test-ZipArchiveFile -Path $OutputFile)) {
                     return $url
                 }
@@ -302,23 +316,32 @@ if ($FrpcExePath) {
     Copy-Item -Path $frpcSource -Destination $frpcExe -Force
 } else {
     Enable-Tls12
-    Write-Step "Downloading frpc v$FrpVersion"
     $tmpZip = Join-Path $env:TEMP "frp_$FrpVersion.zip"
     $tmpExtract = Join-Path $env:TEMP "frp_$FrpVersion"
+    $cachedRuntimeFrpcExe = Join-Path $runtimeDir 'frpc.exe'
+    $cachedRuntimeFrpZip = Join-Path $runtimeDir "frp_${FrpVersion}_windows_amd64.zip"
     if (Test-Path $tmpExtract) {
         Remove-Item -Path $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    $archiveUrls = @(
-        "https://github.com/fatedier/frp/releases/download/v$FrpVersion/frp_${FrpVersion}_windows_amd64.zip",
-        "https://ghproxy.com/https://github.com/fatedier/frp/releases/download/v$FrpVersion/frp_${FrpVersion}_windows_amd64.zip",
-        "https://mirror.ghproxy.com/https://github.com/fatedier/frp/releases/download/v$FrpVersion/frp_${FrpVersion}_windows_amd64.zip"
-    )
+    if (Test-Path $cachedRuntimeFrpcExe) {
+        Write-Step "Using cached frpc.exe from runtime: $cachedRuntimeFrpcExe"
+        $frpcSource = $cachedRuntimeFrpcExe
+    } elseif (Test-ZipArchiveFile -Path $cachedRuntimeFrpZip) {
+        Write-Step "Using cached FRP ZIP archive from runtime: $cachedRuntimeFrpZip"
+        $frpcSource = Get-FrpcFromZipArchive -ZipPath $cachedRuntimeFrpZip -ExtractDir $tmpExtract
+    } else {
+        Write-Step "Downloading frpc v$FrpVersion"
+        $archiveUrls = @(
+            "https://github.com/fatedier/frp/releases/download/v$FrpVersion/frp_${FrpVersion}_windows_amd64.zip"
+        )
 
-    $usedUrl = Download-FileWithFallback -Urls $archiveUrls -OutputFile $tmpZip
-    Write-Host "Downloaded from: $usedUrl"
+        $usedUrl = Download-FileWithFallback -Urls $archiveUrls -OutputFile $tmpZip
+        Write-Host "Downloaded from: $usedUrl"
 
-    $frpcSource = Get-FrpcFromZipArchive -ZipPath $tmpZip -ExtractDir $tmpExtract
+        $frpcSource = Get-FrpcFromZipArchive -ZipPath $tmpZip -ExtractDir $tmpExtract
+    }
+
     Copy-Item -Path $frpcSource -Destination $frpcExe -Force
 }
 
