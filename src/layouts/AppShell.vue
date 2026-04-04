@@ -2,12 +2,13 @@
 import { computed, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/appStore'
-import logoIcon from '@/assets/icon.png'
 import AppIcon from '@/components/shared/AppIcon.vue'
+import { APP_LOGO_COMPACT_URL } from '@/constants/branding'
 
 const appStore = useAppStore()
 const router = useRouter()
 const route = useRoute()
+const logoIcon = APP_LOGO_COMPACT_URL
 const mobileMenuOpen = ref(false)
 const themeAnimating = ref(false)
 
@@ -80,7 +81,7 @@ watch(
       <div class="app-container app-header-inner">
         <div class="brand-wrap">
           <RouterLink to="/" class="brand-link">
-            <img :src="logoIcon" alt="Логотип Семейного древа" class="brand-logo" />
+            <img :src="logoIcon" alt="Логотип Семейного древа" class="brand-logo" width="30" height="30" decoding="async" fetchpriority="high" />
             <span class="brand-text">Семейное древо</span>
           </RouterLink>
           <button
@@ -240,6 +241,7 @@ watch(
 <style scoped>
 .app-shell {
   min-height: 100vh;
+  overflow-x: clip;
 }
 
 .bg-effects {
@@ -290,6 +292,8 @@ watch(
   right: 0;
   top: 0;
   z-index: 200;
+  background: rgba(11, 14, 23, 0.82);
+  -webkit-backdrop-filter: blur(20px);
   backdrop-filter: blur(20px);
   background: color-mix(in srgb, var(--color-bg-alt) 82%, transparent);
   border-bottom: 1px solid var(--color-glass-border);
@@ -306,6 +310,7 @@ watch(
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
 }
 
 .brand-link {
@@ -317,6 +322,7 @@ watch(
   font-weight: 700;
   letter-spacing: 0.02em;
   transition: opacity var(--transition-fast);
+  min-width: 0;
 }
 
 .brand-link:hover {
@@ -328,6 +334,7 @@ watch(
   height: 30px;
   border-radius: 50%;
   object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border: 1px solid color-mix(in srgb, var(--color-glass-border) 75%, transparent);
 }
 
@@ -337,6 +344,10 @@ watch(
   -webkit-text-fill-color: transparent;
   background-clip: text;
   font-size: 1.1rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: min(54vw, 260px);
 }
 
 .theme-toggle-btn {
@@ -487,6 +498,7 @@ watch(
   right: 0;
   bottom: 0;
   background: rgba(0, 0, 0, 0.5);
+  -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
   z-index: 199;
 }
@@ -538,7 +550,9 @@ watch(
   left: 0;
   right: 0;
   z-index: 200;
+  background: rgba(11, 14, 23, 0.92);
   background: color-mix(in srgb, var(--color-bg-alt) 92%, transparent);
+  -webkit-backdrop-filter: blur(20px);
   backdrop-filter: blur(20px);
   border-top: 1px solid var(--color-glass-border);
   padding: 4px 8px;
@@ -624,8 +638,13 @@ main {
 }
 
 @media (max-width: 480px) {
+  .app-header-inner {
+    gap: 10px;
+  }
+
   .brand-text {
     font-size: 0.95rem;
+    max-width: min(46vw, 180px);
   }
 
   .bottom-label {

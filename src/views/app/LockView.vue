@@ -2,11 +2,12 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/appStore'
-import logoIcon from '@/assets/icon.png'
 import AppIcon from '@/components/shared/AppIcon.vue'
+import { APP_LOGO_STANDARD_URL } from '@/constants/branding'
 
 const router = useRouter()
 const appStore = useAppStore()
+const logoIcon = APP_LOGO_STANDARD_URL
 
 const pin = ref('')
 const error = ref('')
@@ -53,7 +54,7 @@ function triggerShake(): void {
         </svg>
       </div>
 
-      <img :src="logoIcon" alt="Логотип Семейного древа" class="lock-brand-logo" />
+      <img :src="logoIcon" alt="Логотип Семейного древа" class="lock-brand-logo" width="72" height="72" decoding="async" loading="eager" fetchpriority="high" />
       <h1 class="lock-title">Семейное древо</h1>
       <p class="lock-subtitle">Введите PIN для доступа</p>
 

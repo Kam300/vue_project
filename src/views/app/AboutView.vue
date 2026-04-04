@@ -3,9 +3,10 @@ import { computed } from 'vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import AppIcon from '@/components/shared/AppIcon.vue'
 import { useAppStore } from '@/stores/appStore'
-import logoIcon from '@/assets/icon.png'
+import { APP_LOGO_COMPACT_URL } from '@/constants/branding'
 
 const appStore = useAppStore()
+const logoIcon = APP_LOGO_COMPACT_URL
 
 const appVersion = String(import.meta.env.VITE_APP_VERSION || '1.0.0')
 const productionDomain = 'https://totalcode.indevs.in'
@@ -34,7 +35,7 @@ const infoItems = [
         <!-- App info header -->
         <div class="about-hero">
           <div class="about-logo">
-            <img :src="logoIcon" alt="Логотип Семейного древа" class="about-logo-img" />
+            <img :src="logoIcon" alt="Логотип Семейного древа" class="about-logo-img" width="44" height="44" decoding="async" loading="lazy" />
           </div>
           <div>
             <h2 class="about-app-name">Семейное древо</h2>

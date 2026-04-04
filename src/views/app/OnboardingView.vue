@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import logoIcon from '@/assets/icon.png'
 import AppIcon from '@/components/shared/AppIcon.vue'
 import SyncProgress from '@/components/shared/SyncProgress.vue'
 import YandexIdButton from '@/components/shared/YandexIdButton.vue'
 import { connectPortableIdentityAndSync } from '@/services/portableIdentitySync'
 import { useAppStore } from '@/stores/appStore'
+import { APP_LOGO_COMPACT_URL } from '@/constants/branding'
 
 const appStore = useAppStore()
 const router = useRouter()
+const logoIcon = APP_LOGO_COMPACT_URL
 
 const page = ref(0)
 const consent = ref(false)
@@ -129,7 +130,7 @@ async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void>
   <section class="onboarding-page">
     <div class="onboarding-center">
       <div class="onboarding-brand">
-        <img :src="logoIcon" alt="Логотип Семейного древа" class="onboarding-brand-logo" />
+        <img :src="logoIcon" alt="Логотип Семейного древа" class="onboarding-brand-logo" width="30" height="30" decoding="async" fetchpriority="high" />
         <span>Семейное древо</span>
       </div>
 

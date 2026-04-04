@@ -14,8 +14,13 @@ const warning = ref('')
 const facesPreview = ref<Array<{ member_id: string; member_name: string }>>([])
 const facesCount = ref(0)
 const logs = ref<Array<{ ts: string; icon: string; message: string; type: string }>>([])
+const healthBusy = ref(false)
+const facesBusy = ref(false)
 
 let timer: number | null = null
+let stopPolling = false
+let healthRequestController: AbortController | null = null
+let facesRequestController: AbortController | null = null
 const LOG_ICON_ALIASES: Record<string, string> = {
   '\u{1F465}': 'groups',
   '\u26A0\uFE0F': 'warning',
@@ -41,15 +46,48 @@ function addLocalLog(icon: string, message: string, type = 'info'): void {
   logs.value = logs.value.slice(0, 80)
 }
 
+function getNowMs(): number {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now()
+}
+
+function clearRefreshTimer(): void {
+  if (timer !== null) {
+    window.clearTimeout(timer)
+    timer = null
+  }
+}
+
+function scheduleRefresh(delay = 15000): void {
+  clearRefreshTimer()
+  if (stopPolling) return
+  timer = window.setTimeout(() => {
+    void refreshHealth()
+  }, delay)
+}
+
+function isCancelled(controller: AbortController | null, reason: unknown): boolean {
+  return Boolean(controller?.signal.aborted) || (reason instanceof Error && reason.message === 'Запрос был отменён.')
+}
+
 async function refreshHealth(): Promise<void> {
+  if (healthBusy.value) return
+
   error.value = ''
   warning.value = ''
-  const started = performance.now()
+  healthBusy.value = true
+  const started = getNowMs()
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
+  healthRequestController = controller
 
   try {
-    const response = await healthCheck()
+    const response = await healthCheck({
+      signal: controller?.signal,
+      timeoutMs: 8000
+    })
     health.value = response
-    latency.value = Math.round(performance.now() - started)
+    latency.value = Math.round(getNowMs() - started)
     status.value = 'online'
     info.value = 'Статус сервера обновлен.'
     if (!response.face_recognition) {
@@ -77,16 +115,33 @@ async function refreshHealth(): Promise<void> {
 
     logs.value = deduped
   } catch (reason) {
+    if (isCancelled(controller, reason) || stopPolling) return
     status.value = 'offline'
     latency.value = null
     error.value = `Сервер недоступен: ${(reason as Error).message}`
+  } finally {
+    if (healthRequestController === controller) {
+      healthRequestController = null
+    }
+    healthBusy.value = false
+    if (!stopPolling) {
+      scheduleRefresh()
+    }
   }
 }
 
 async function refreshFaces(): Promise<void> {
+  if (facesBusy.value) return
+
   error.value = ''
+  facesBusy.value = true
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
+  facesRequestController = controller
   try {
-    const response = await listFaces()
+    const response = await listFaces({
+      signal: controller?.signal,
+      timeoutMs: 10000
+    })
     if (!response.success) {
       throw new Error(response.error || 'Ошибка получения списка лиц')
     }
@@ -96,21 +151,27 @@ async function refreshFaces(): Promise<void> {
     addLocalLog('groups', `В базе распознавания ${response.count} лиц`, 'success')
     info.value = 'Список лиц обновлен.'
   } catch (reason) {
+    if (isCancelled(controller, reason)) return
     error.value = `Не удалось получить список лиц: ${(reason as Error).message}`
     addLocalLog('warning', error.value, 'error')
+  } finally {
+    if (facesRequestController === controller) {
+      facesRequestController = null
+    }
+    facesBusy.value = false
   }
 }
 
 onMounted(async () => {
+  stopPolling = false
   await refreshHealth()
-  timer = window.setInterval(refreshHealth, 15000)
 })
 
 onUnmounted(() => {
-  if (timer !== null) {
-    window.clearInterval(timer)
-    timer = null
-  }
+  stopPolling = true
+  clearRefreshTimer()
+  healthRequestController?.abort()
+  facesRequestController?.abort()
 })
 </script>
 
@@ -158,13 +219,13 @@ onUnmounted(() => {
         </div>
 
         <div class="btn-row action-row">
-          <button class="btn-action" @click="refreshHealth">
+          <button class="btn-action" @click="refreshHealth" :disabled="healthBusy">
             <AppIcon name="refresh" :size="16" />
-            Обновить health
+            {{ healthBusy ? 'Обновляем...' : 'Обновить health' }}
           </button>
-          <button class="btn-action" @click="refreshFaces">
+          <button class="btn-action" @click="refreshFaces" :disabled="facesBusy">
             <AppIcon name="person_search" :size="16" />
-            Список лиц
+            {{ facesBusy ? 'Загружаем...' : 'Список лиц' }}
           </button>
         </div>
 

@@ -1,8 +1,10 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import logoIcon from '@/assets/icon.png'
 import AppIcon from '@/components/shared/AppIcon.vue'
+import { healthCheck, listFaces } from '@/services/api'
+import { APP_LOGO_COMPACT_URL } from '@/constants/branding'
 
+const logoIcon = APP_LOGO_COMPACT_URL
 const apiStatus = ref(null)
 const apiLatency = ref(null)
 const memberCount = ref(0)
@@ -12,6 +14,11 @@ const logs = ref([])
 const maxLogs = 40
 let pollTimer = null
 let checkCount = ref(0)
+const healthBusy = ref(false)
+const facesBusy = ref(false)
+let stopHealthPolling = false
+let healthRequestController = null
+let facesRequestController = null
 const shownEventKeys = new Set()
 const LOG_ICON_ALIASES = {
   '\u{1F4E1}': 'rss_feed',
@@ -43,7 +50,7 @@ function addLog(icon, message, type = 'info') {
   if (logs.value.length > maxLogs) logs.value.pop()
 }
 
-async function checkHealth() {
+async function legacyCheckHealth() {
   const start = performance.now()
   checkCount.value++
   addLog('rss_feed', 'Отправляем запрос на проверку сервера...', 'sending')
@@ -86,7 +93,7 @@ async function checkHealth() {
   }
 }
 
-async function testListFaces() {
+async function legacyTestListFaces() {
   const start = performance.now()
   addLog('search', 'Запрашиваем список зарегистрированных лиц...', 'sending')
   try {
@@ -116,14 +123,178 @@ async function testListFaces() {
   }
 }
 
-onMounted(() => {
+onMounted(() => { return
   addLog('rocket_launch', 'Страница загружена — начинаем мониторинг сервера', 'info')
   checkHealth()
   pollTimer = setInterval(checkHealth, 15000)
 })
 
-onUnmounted(() => {
+onUnmounted(() => { return
   if (pollTimer) clearInterval(pollTimer)
+})
+
+function getNowMs() {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now()
+}
+
+function createAbortController() {
+  return typeof AbortController !== 'undefined' ? new AbortController() : null
+}
+
+function clearHealthPollTimer() {
+  if (pollTimer !== null) {
+    clearTimeout(pollTimer)
+    pollTimer = null
+  }
+}
+
+function scheduleHealthPoll(delay = 15000) {
+  clearHealthPollTimer()
+  if (stopHealthPolling) return
+  pollTimer = setTimeout(() => {
+    void checkHealth()
+  }, delay)
+}
+
+function isRequestCancelled(controller, error) {
+  return Boolean(controller?.signal?.aborted) || (error instanceof Error && error.message === 'Запрос был отменён.')
+}
+
+function getOfflineHint() {
+  return typeof navigator !== 'undefined' && navigator.onLine === false
+    ? ' Похоже, устройство сейчас офлайн.'
+    : ''
+}
+
+async function checkHealth() {
+  if (healthBusy.value) return
+
+  const start = getNowMs()
+  healthBusy.value = true
+  checkCount.value++
+  const controller = createAbortController()
+  healthRequestController = controller
+  addLog('rss_feed', 'Отправляем запрос на проверку сервера...', 'sending')
+  try {
+    const data = await healthCheck({
+      signal: controller?.signal,
+      timeoutMs: 8000
+    })
+    const elapsed = Math.round(getNowMs() - start)
+    apiLatency.value = elapsed
+    apiStatus.value = 'online'
+    memberCount.value = data.members_count || 0
+    faceRecOk.value = data.face_recognition
+    pdfGenOk.value = data.pdf_generation
+    addLog('check_circle', `Сервер работает! Время ответа: ${elapsed}мс`, 'success')
+    if (data.face_recognition) {
+      addLog('psychology', 'Модуль распознавания лиц активен', 'success')
+    }
+    if (data.pdf_generation) {
+      addLog('description', 'Модуль генерации PDF активен', 'success')
+    }
+    addLog('groups', `Зарегистрировано лиц в базе: ${data.members_count}`, 'info')
+
+    if (data.recent_events && data.recent_events.length > 0) {
+      data.recent_events.forEach(ev => {
+        const key = `${ev.ts}_${ev.message}`
+        if (!shownEventKeys.has(key)) {
+          shownEventKeys.add(key)
+          addLog(normalizeLogIcon(ev.icon || 'notifications'), ev.message, ev.type || 'info')
+        }
+      })
+    }
+  } catch (error) {
+    if (isRequestCancelled(controller, error) || stopHealthPolling) return
+    apiStatus.value = 'offline'
+    apiLatency.value = null
+    const message = error instanceof Error
+      ? error.message
+      : 'Не удалось подключиться к серверу.'
+    addLog('error', `${message}${getOfflineHint()}`, 'error')
+  } finally {
+    if (healthRequestController === controller) {
+      healthRequestController = null
+    }
+    healthBusy.value = false
+    if (!stopHealthPolling) {
+      scheduleHealthPoll()
+    }
+  }
+}
+
+async function testListFaces() {
+  if (facesBusy.value) return
+
+  const start = getNowMs()
+  facesBusy.value = true
+  const controller = createAbortController()
+  facesRequestController = controller
+  addLog('search', 'Запрашиваем список зарегистрированных лиц...', 'sending')
+  try {
+    const data = await listFaces({
+      signal: controller?.signal,
+      timeoutMs: 10000
+    })
+    if (!data.success) {
+      throw new Error(data.error || data.details || 'Не удалось получить список лиц.')
+    }
+
+    const elapsed = Math.round(getNowMs() - start)
+    const count = data.count || 0
+    addLog('check_circle', `Получен ответ за ${elapsed}мс`, 'success')
+    if (count === 0) {
+      addLog('list_alt', 'В базе пока нет зарегистрированных лиц', 'info')
+    } else {
+      addLog('list_alt', `Найдено лиц: ${count}`, 'info')
+      const faces = data.faces || []
+      faces.slice(0, 5).forEach(face => {
+        addLog('person', `${face.member_name} (ID: ${face.member_id})`, 'info')
+      })
+      if (faces.length > 5) {
+        addLog('add', `... и ещё ${faces.length - 5}`, 'info')
+      }
+    }
+  } catch (error) {
+    if (isRequestCancelled(controller, error)) return
+    const message = error instanceof Error
+      ? error.message
+      : 'Не удалось получить список лиц.'
+    addLog('error', `${message}${getOfflineHint()}`, 'error')
+  } finally {
+    if (facesRequestController === controller) {
+      facesRequestController = null
+    }
+    facesBusy.value = false
+  }
+}
+
+function handleConnectionRestored() {
+  addLog('check_circle', 'Соединение восстановлено. Повторяем проверку сервера.', 'success')
+  void checkHealth()
+}
+
+function handleConnectionLost() {
+  addLog('warning', 'Соединение с сетью потеряно. Проверки сервера могут временно завершаться ошибкой.', 'error')
+}
+
+onMounted(() => {
+  stopHealthPolling = false
+  addLog('rocket_launch', 'Страница загружена. Начинаем мониторинг сервера.', 'info')
+  window.addEventListener('online', handleConnectionRestored)
+  window.addEventListener('offline', handleConnectionLost)
+  void checkHealth()
+})
+
+onUnmounted(() => {
+  stopHealthPolling = true
+  clearHealthPollTimer()
+  healthRequestController?.abort()
+  facesRequestController?.abort()
+  window.removeEventListener('online', handleConnectionRestored)
+  window.removeEventListener('offline', handleConnectionLost)
 })
 
 const activeTechIndex = ref(0)
@@ -235,7 +406,7 @@ const androidApkUrl = '/app-debug.apk'
     <nav class="navbar animate-in">
       <div class="container nav-inner">
         <div class="nav-brand">
-          <img :src="logoIcon" alt="Логотип Семейного древа" class="nav-logo" />
+          <img :src="logoIcon" alt="Логотип Семейного древа" class="nav-logo" width="28" height="28" decoding="async" fetchpriority="high" />
           <span>Семейное древо</span>
         </div>
         <div class="nav-links">
@@ -318,6 +489,9 @@ const androidApkUrl = '/app-debug.apk'
         </div>
       </div>
     </section>
+    <div class="container hero-accessory-wrap">
+      <slot name="hero-accessory" />
+    </div>
 
     <!-- FEATURES -->
     <section id="features" class="section features-section">
@@ -429,11 +603,11 @@ const androidApkUrl = '/app-debug.apk'
 
           <!-- Quick actions -->
           <div class="api-actions">
-            <button class="action-btn" @click="checkHealth">
+            <button class="action-btn" @click="checkHealth" :disabled="healthBusy">
               <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path d="M4 2a1 1 0 011 1v2.1c1.5-1.6 3.5-2.6 5.8-2.6 4.4 0 8 3.6 8 8s-3.6 8-8 8-8-3.6-8-8a1 1 0 012 0c0 3.3 2.7 6 6 6s6-2.7 6-6-2.7-6-6-6c-1.8 0-3.4.8-4.5 2H8a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1z"/></svg>
               Проверить сервер
             </button>
-            <button class="action-btn" @click="testListFaces">
+            <button class="action-btn" @click="testListFaces" :disabled="facesBusy">
               <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path d="M9 6a3 3 0 110 6 3 3 0 010-6zm0-2a5 5 0 100 10A5 5 0 009 4zm8 12a1 1 0 01-2 0c0-2.8-2.2-4-5-4s-5 1.2-5 4a1 1 0 01-2 0c0-4.2 3.6-6 7-6s7 1.8 7 6z"/></svg>
               Список лиц в базе
             </button>
@@ -484,7 +658,7 @@ const androidApkUrl = '/app-debug.apk'
     <footer class="footer">
       <div class="container footer-inner">
         <div class="footer-brand">
-          <img :src="logoIcon" alt="Логотип Семейного древа" class="nav-logo" />
+          <img :src="logoIcon" alt="Логотип Семейного древа" class="nav-logo" width="22" height="22" decoding="async" loading="lazy" />
           <span>Семейное древо</span>
         </div>
         <p class="footer-copy">© 2026 Дипломный проект. Все права защищены.</p>
@@ -530,7 +704,9 @@ const androidApkUrl = '/app-debug.apk'
 /* ---- NAV ---- */
 .navbar {
   position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  background: rgba(11, 14, 23, 0.78);
   background: color-mix(in srgb, var(--color-bg-alt) 75%, transparent);
+  -webkit-backdrop-filter: blur(20px);
   backdrop-filter: blur(20px);
   border-bottom: 1px solid var(--color-glass-border);
 }
@@ -630,6 +806,10 @@ const androidApkUrl = '/app-debug.apk'
 
 /* Phone Mock */
 .hero-visual { display: flex; justify-content: center; }
+.hero-accessory-wrap {
+  position: relative;
+  z-index: 3;
+}
 .phone-mockup {
   width: 260px; height: 460px;
   background: var(--color-bg-alt);
@@ -771,6 +951,7 @@ const androidApkUrl = '/app-debug.apk'
   appearance: none;
   display: inline-flex; align-items: center; gap: 8px;
   padding: 10px 20px; border-radius: 999px;
+  background: rgba(20, 24, 37, 0.9);
   background: var(--color-glass);
   border: 1px solid var(--color-glass-border);
   color: var(--color-text);
@@ -784,6 +965,7 @@ const androidApkUrl = '/app-debug.apk'
 .tech-badge:focus-visible {
   border-color: var(--badge-color);
   transform: translateY(-2px);
+  box-shadow: 0 0 20px rgba(124, 92, 252, 0.18);
   box-shadow: 0 0 20px color-mix(in srgb, var(--badge-color) 25%, transparent);
 }
 .tech-badge:focus-visible {
@@ -795,9 +977,11 @@ const androidApkUrl = '/app-debug.apk'
   margin: 18px auto 0;
   max-width: 760px;
   text-align: left;
+  background: rgba(18, 22, 35, 0.96);
   background:
     linear-gradient(135deg, color-mix(in srgb, var(--badge-color) 12%, rgba(255,255,255,0.03)), rgba(255,255,255,0.02)),
     var(--color-glass);
+  border: 1px solid rgba(124, 92, 252, 0.26);
   border: 1px solid color-mix(in srgb, var(--badge-color) 45%, var(--color-glass-border));
   border-radius: var(--radius-lg);
   padding: 18px 20px;
@@ -923,6 +1107,12 @@ const androidApkUrl = '/app-debug.apk'
   background: var(--color-surface-hover);
   color: var(--color-text);
   border-color: var(--color-accent);
+}
+.action-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+  border-color: var(--color-glass-border);
+  color: var(--color-text-muted);
 }
 
 .api-caps {

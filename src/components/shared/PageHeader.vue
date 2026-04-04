@@ -46,4 +46,31 @@ defineProps<{
   animation: gradientShift 3s ease infinite;
   background-size: 200% 200%;
 }
+
+@media (max-width: 640px) {
+  .page-header {
+    margin-bottom: 18px;
+  }
+
+  .page-header-row {
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .page-header-icon {
+    margin-top: 4px;
+  }
+
+  .app-section-title {
+    font-size: clamp(1.7rem, 8vw, 2.1rem);
+    line-height: 1.02;
+    margin-bottom: 8px;
+  }
+
+  .app-section-subtitle {
+    margin-bottom: 0;
+    font-size: 0.98rem;
+    line-height: 1.45;
+  }
+}
 </style>

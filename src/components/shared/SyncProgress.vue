@@ -31,6 +31,7 @@ const percent = computed(() => Math.max(0, Math.min(100, Math.round(props.progre
   padding: 12px 14px;
   border: 1px solid var(--color-glass-border);
   border-radius: var(--radius-md);
+  background: rgba(22, 27, 41, 0.94);
   background: color-mix(in srgb, var(--color-surface) 94%, transparent);
 }
 

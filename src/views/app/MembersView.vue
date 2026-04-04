@@ -93,7 +93,7 @@ function openContact(url: string): void {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
               </button>
             </div>
-            <button class="btn-action primary" @click="router.push('/app/members/new')">
+            <button class="btn-action primary members-add-btn" @click="router.push('/app/members/new')">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
               Добавить
             </button>
@@ -242,6 +242,7 @@ function openContact(url: string): void {
 <style scoped>
 .members-card {
   padding: 20px;
+  overflow: hidden;
 }
 
 .members-toolbar {
@@ -256,7 +257,7 @@ function openContact(url: string): void {
 .search-wrap {
   position: relative;
   flex: 1;
-  min-width: 240px;
+  min-width: 0;
   max-width: 480px;
 }
 
@@ -292,6 +293,7 @@ function openContact(url: string): void {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
 }
 
 .view-toggle {
@@ -356,6 +358,7 @@ function openContact(url: string): void {
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  align-items: start;
 }
 
 .member-card-item {
@@ -421,11 +424,88 @@ function openContact(url: string): void {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
+  align-items: center;
+}
+
+.card-actions .btn-action,
+.card-actions .btn-action.danger {
+  flex: 0 0 auto;
+  min-width: 42px;
+  padding: 10px 12px;
+}
+
+@media (max-width: 640px) {
+  .members-card {
+    padding: 16px;
+  }
+
+  .members-toolbar {
+    align-items: stretch;
+  }
+
+  .search-wrap {
+    min-width: 0;
+    max-width: none;
+  }
+
+  .toolbar-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .members-add-btn {
+    flex: 1 1 auto;
+  }
+
+  .member-card-item {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .card-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
 }
 
 @media (max-width: 480px) {
   .cards-grid {
     grid-template-columns: 1fr;
+  }
+
+  .members-card {
+    padding: 14px;
+  }
+
+  .view-toggle {
+    display: none;
+  }
+
+  .toolbar-actions {
+    gap: 8px;
+  }
+
+  .members-add-btn {
+    min-width: 0;
+  }
+
+  .member-card-item {
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .card-avatar {
+    width: 44px;
+    height: 44px;
+  }
+
+  .card-info h3 {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    line-height: 1.25;
   }
 }
 

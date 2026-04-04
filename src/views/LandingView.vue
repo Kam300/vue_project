@@ -56,7 +56,7 @@ async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void>
   authError.value = ''
   authStatus.value = ''
   authProgress.value = 0
-  authProgressLabel.value = 'Подготовка…'
+  authProgressLabel.value = 'Подготовка...'
 
   try {
     authStatus.value = await connectPortableIdentityAndSync(provider, {
@@ -80,68 +80,76 @@ onMounted(() => {
 
 <template>
   <div class="landing-wrap">
-    <LandingPage />
+    <LandingPage>
+      <template #hero-accessory>
+        <aside class="portable-auth-box">
+          <p class="portable-auth-title">Подключите вход для переноса backup между устройствами</p>
+          <p v-if="authInitBusy" class="portable-auth-hint">Проверяем доступные способы входа...</p>
+          <p v-else-if="hasPortableIdentity" class="portable-auth-status ok">
+            {{ portableIdentityTitle }}
+            <span v-if="portableIdentityName">{{ portableIdentityName }}</span>
+          </p>
 
-    <aside class="portable-auth-box">
-      <p class="portable-auth-title">Подключите вход для переноса backup между устройствами</p>
-      <p v-if="authInitBusy" class="portable-auth-hint">Проверяем доступные способы входа…</p>
-      <p v-else-if="hasPortableIdentity" class="portable-auth-status ok">
-        {{ portableIdentityTitle }}
-        <span v-if="portableIdentityName">{{ portableIdentityName }}</span>
-      </p>
+          <span class="portable-auth-label">Войти с помощью</span>
+          <div class="portable-auth-actions">
+            <YandexIdButton
+              class="portable-auth-btn portable-auth-btn-yandex"
+              @click="connectPortableIdentity('yandex')"
+              :disabled="authInitBusy || Boolean(authBusy) || !yandexConfigured"
+              :loading="authBusy === 'yandex'"
+            />
+            <button
+              class="portable-auth-btn portable-auth-btn-vk"
+              @click="connectPortableIdentity('vk')"
+              :disabled="authInitBusy || Boolean(authBusy) || !vkConfigured"
+            >
+              {{ authBusy === 'vk' ? 'Подключение...' : 'Войти с VK ID' }}
+            </button>
+          </div>
 
-      <span class="portable-auth-label">Войти с помощью</span>
-      <div class="portable-auth-actions">
-        <YandexIdButton
-          class="portable-auth-btn portable-auth-btn-yandex"
-          @click="connectPortableIdentity('yandex')"
-          :disabled="authInitBusy || Boolean(authBusy) || !yandexConfigured"
-          :loading="authBusy === 'yandex'"
-        />
-        <button
-          class="portable-auth-btn portable-auth-btn-vk"
-          @click="connectPortableIdentity('vk')"
-          :disabled="authInitBusy || Boolean(authBusy) || !vkConfigured"
-        >
-          {{ authBusy === 'vk' ? 'Подключение…' : 'Войти с VK ID' }}
-        </button>
-      </div>
+          <SyncProgress
+            :visible="Boolean(authBusy)"
+            :progress="authProgress"
+            :label="authProgressLabel"
+          />
 
-      <SyncProgress
-        :visible="Boolean(authBusy)"
-        :progress="authProgress"
-        :label="authProgressLabel"
-      />
+          <p v-if="authStatus" class="portable-auth-status ok">{{ authStatus }}</p>
+          <p v-if="authError" class="portable-auth-status err">{{ authError }}</p>
+        </aside>
 
-      <p v-if="authStatus" class="portable-auth-status ok">{{ authStatus }}</p>
-      <p v-if="authError" class="portable-auth-status err">{{ authError }}</p>
-    </aside>
+        <div class="floating-cta-stack">
+          <a class="apk-download-btn" href="/app-debug.apk" download="app-debug.apk">
+            Скачать Android APK
+          </a>
 
-    <div class="floating-cta-stack">
-      <a class="apk-download-btn" href="/app-debug.apk" download="app-debug.apk">
-        Скачать Android APK
-      </a>
-
-      <RouterLink class="open-app-btn" to="/app/members">
-        Открыть web-приложение
-      </RouterLink>
-    </div>
+          <RouterLink class="open-app-btn" to="/app/members">
+            Открыть web-приложение
+          </RouterLink>
+        </div>
+      </template>
+    </LandingPage>
   </div>
 </template>
 
 <style scoped>
+.landing-wrap {
+  overflow-x: clip;
+}
+
 .portable-auth-box {
   position: fixed;
   right: 16px;
   bottom: 132px;
   z-index: 320;
-  width: min(420px, calc(100vw - 32px));
+  width: min(404px, calc(100vw - 32px));
   display: grid;
   gap: 12px;
   padding: 16px;
   border-radius: 22px;
   border: 1px solid var(--color-glass-border);
+  background: rgba(11, 14, 23, 0.92);
   background: color-mix(in srgb, var(--color-bg-alt) 92%, transparent);
+  -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
   box-shadow: var(--shadow-elevated);
 }
@@ -160,7 +168,7 @@ onMounted(() => {
 .portable-auth-title {
   margin: 0;
   font-size: 0.95rem;
-  line-height: 1.5;
+  line-height: 1.45;
   color: var(--color-text);
   font-weight: 600;
 }
@@ -194,6 +202,7 @@ onMounted(() => {
   min-height: 44px;
   border-radius: 16px;
   border: 1px solid var(--color-glass-border);
+  background: rgba(22, 27, 41, 0.94);
   background: color-mix(in srgb, var(--color-surface) 94%, transparent);
   color: var(--color-text);
   font: inherit;
@@ -246,13 +255,16 @@ onMounted(() => {
   font-weight: 600;
   font-family: var(--font-sans);
   color: var(--color-text);
+  background: rgba(11, 14, 23, 0.88);
   background: color-mix(in srgb, var(--color-bg-alt) 88%, transparent);
+  -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
   transition: all var(--transition-normal);
 }
 
 .apk-download-btn:hover {
   border-color: rgba(124, 92, 252, 0.45);
+  background: rgba(11, 14, 23, 0.95);
   background: color-mix(in srgb, var(--color-bg-alt) 95%, transparent);
   transform: translateY(-2px);
 }
@@ -284,10 +296,13 @@ onMounted(() => {
 
 @media (max-width: 680px) {
   .portable-auth-box {
-    right: 12px;
-    left: 12px;
-    bottom: 136px;
-    width: auto;
+    position: relative;
+    right: auto;
+    left: auto;
+    bottom: auto;
+    z-index: auto;
+    width: 100%;
+    margin: 0;
     padding: 14px;
   }
 
@@ -296,9 +311,12 @@ onMounted(() => {
   }
 
   .floating-cta-stack {
-    right: 12px;
-    bottom: 12px;
-    width: calc(100vw - 24px);
+    position: relative;
+    right: auto;
+    bottom: auto;
+    z-index: auto;
+    width: 100%;
+    margin-top: 14px;
   }
 
   .apk-download-btn,

@@ -443,7 +443,8 @@
     width: 100%;
   }
 
-  .btn-action {
+  .btn-row > .btn-action,
+  .btn-row > a.btn-action {
     flex: 1 1 calc(50% - 8px);
     min-width: 140px;
   }
@@ -456,11 +457,12 @@
 
 @media (max-width: 480px) {
   .app-page {
-    padding-top: 110px;
+    padding-top: 122px;
     padding-bottom: 94px;
   }
 
-  .btn-action {
+  .btn-row > .btn-action,
+  .btn-row > a.btn-action {
     padding: 9px 14px;
     font-size: 0.8rem;
     flex-basis: 100%;
@@ -468,5 +470,11 @@
 
   .btn-row {
     gap: 8px;
+  }
+}
+
+@media (max-width: 360px) {
+  .app-page {
+    padding-top: 128px;
   }
 }
