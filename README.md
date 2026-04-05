@@ -1,139 +1,93 @@
-# Vue + Flask Global Deploy (Windows + Cloudflare Tunnel)
+# Семейное древо: web + backend + Windows setup
 
-Сайт и API запускаются на вашем ПК и доступны глобально через:
-- `https://totalcode.indevs.in/`
-- `https://totalcode.indevs.in/api/*` (каноничный API)
-- `https://totalcode.indevs.in/health` и другие legacy пути (обратная совместимость)
+Этот репозиторий содержит веб-часть проекта, Python backend и Windows-скрипты для локального запуска и настройки VPS/ПК.
 
-## Архитектура
+## Что есть в репозитории
 
-1. `backend/telegram_service.py` (Flask + Waitress) на `127.0.0.1:5000`
-2. `Caddy` на `127.0.0.1:8080`:
-   - `/api/*` -> Flask (без префикса `/api`)
-   - legacy endpoints -> Flask
-   - остальное -> `dist` (SPA fallback)
-3. `cloudflared` публикует `totalcode.indevs.in -> http://127.0.0.1:8080`
+- `src/` — web-приложение на Vue 3
+- `backend/` — API на Python
+- `scripts/` — PowerShell-скрипты для запуска, FRP и сборки утилит
+- `public/` — статические файлы, иконки, APK
+- `dist-tools/` — собранные Windows `.exe`
 
-## Первый запуск (один раз)
+## Что умеет проект
 
-1. Установите в PATH:
-   - `node`, `npm`, `python`
-   - `caddy`
-   - `cloudflared`
-   - Для Windows отдельный `cmake` не нужен: скрипт использует `dlib-bin` (prebuilt wheel).
-2. Создайте tunnel и DNS:
+- лендинг и web-приложение `/app`
+- список членов семьи и дерево
+- экспорт и backup
+- работа с фото и server API
+- Windows-мастер для настройки сервера на ПК
 
-```powershell
-cloudflared tunnel login
-cloudflared tunnel create vue-api-pc
-cloudflared tunnel route dns vue-api-pc totalcode.indevs.in
-```
+## Что нужно для запуска
 
-3. Подготовьте конфиг tunnel:
+- Node.js 20+
+- Python 3.11+
+- Windows PowerShell
+
+## Быстрый старт для разработки
+
+### 1. Установить frontend-зависимости
 
 ```powershell
-Copy-Item infra/cloudflared/config.yml.example infra/cloudflared/config.yml
+npm install
 ```
 
-Отредактируйте `infra/cloudflared/config.yml`:
-- `tunnel: <REAL_TUNNEL_ID>`
-- `credentials-file: <FULL_PATH_TO_JSON>`
-
-4. Подготовьте backend env:
+### 2. Поднять backend
 
 ```powershell
-Copy-Item backend/.env.example backend/.env
+cd backend
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-При необходимости задайте `GOOGLE_DRIVE_FOLDER_ID` и другие параметры.
+### 3. Запустить проект
 
-## Ежедневный запуск
+Frontend:
+
+```powershell
+npm run dev
+```
+
+Backend:
+
+```powershell
+cd backend
+.venv\Scripts\python.exe telegram_service.py
+```
+
+## Запуск всего стека на Windows
+
+Если нужен запуск через готовый PowerShell-скрипт:
 
 ```powershell
 .\scripts\deploy-and-run.ps1
 ```
 
-Скрипт:
-1. Проверяет зависимости
-2. Ставит frontend/backend зависимости
-3. Собирает Vite (`dist`)
-4. Запускает API, Caddy и cloudflared в фоне
-5. Делает health-check локально и снаружи
-6. Пишет PID и логи в `.runtime/`
-
-## Остановка
+Остановка:
 
 ```powershell
 .\scripts\stop-all.ps1
 ```
 
-## Логи и PID
-
-- PID: `.runtime/pids.json`
-- API logs: `.runtime/api.out.log`, `.runtime/api.err.log`
-- Caddy logs: `.runtime/caddy.out.log`, `.runtime/caddy.err.log`
-- Cloudflared logs: `.runtime/cloudflared.out.log`, `.runtime/cloudflared.err.log`
-
-## Локальная разработка фронта
+## Полезные команды
 
 ```powershell
 npm run dev
-```
-
-В dev-режиме Vite проксирует `/api/*` на `http://127.0.0.1:5000`.
-
-## Веб-приложение «Семейное древо» (`/app`)
-
-- `/` остается лендингом.
-- Основное web-приложение: `/app`.
-- Основные маршруты:
-  - `/app/members`, `/app/members/new`, `/app/members/:id`
-  - `/app/tree`
-  - `/app/photos`
-  - `/app/export`
-  - `/app/backup`
-  - `/app/server`
-  - `/app/settings`
-  - `/app/about`
-  - `/app/onboarding`
-  - `/app/lock`
-
-## Frontend Env
-
-Добавьте в `.env` (frontend):
-
-```env
-VITE_API_BASE=/api
-VITE_APP_VERSION=1.0.0
-VITE_GOOGLE_WEB_CLIENT_ID=YOUR_GOOGLE_WEB_CLIENT_ID.apps.googleusercontent.com
-```
-
-## Scripts
-
-```powershell
-npm run dev
-npm run typecheck
 npm run build
+npm run typecheck
+.\scripts\build-pc-setup-ui.ps1
 ```
 
-## Технологии web app
+## Что собирается
 
-- Vue 3 + TypeScript
-- Vue Router + Pinia
-- Dexie (IndexedDB, local-first)
-- Zod (валидация)
-- JSZip (backup ZIP)
-- Vite PWA plugin (manifest + service worker)
+- web-сборка: `dist/`
+- Windows-утилиты: `dist-tools/`
 
-## Google OAuth (backup)
+## Где смотреть дальше
 
-Для fallback popup-авторизации добавьте в Google Cloud Console для вашего OAuth Web Client:
-
-- Authorized JavaScript origins:
-  - `https://totalcode.indevs.in`
-  - `http://localhost:5173`
-  - `http://127.0.0.1:5173`
-- Authorized redirect URIs:
-  - `https://totalcode.indevs.in/google-oauth-popup.html`
-  - `http://localhost:5173/google-oauth-popup.html`
-  - `http://127.0.0.1:5173/google-oauth-popup.html`
+- backend-детали: `backend/README.md`
+- описание таблиц SQLite: `backend/README.md` -> раздел `Структура базы данных`
+- инфраструктура: `infra/`
+- дополнительные заметки: `docs/`
