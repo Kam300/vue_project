@@ -46,6 +46,7 @@ backend/.env
 backend/token.pickle
 backend/oauth_credentials.json
 backend/face_encodings.json
+backend/familyone.db
 backend/reference_photos/
 backend/uploaded_photos/
 backend/temp_pdf/
