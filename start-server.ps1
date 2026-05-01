@@ -38,6 +38,7 @@ $venvPython         = Join-Path $venvDir 'Scripts\python.exe'
 $frpcExePath        = 'C:\frp\frpc.exe'
 $frpcConfigPath     = 'C:\frp\frpc.toml'
 $caddyConfigPath    = Join-Path $repoRoot 'infra\Caddyfile'
+$caddyLocalPort     = 8080
 
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 
@@ -361,6 +362,107 @@ function Stop-MatchingProcesses {
             Start-Sleep -Seconds $DelaySeconds
         }
     }
+}
+
+function Get-ListeningPortOwners {
+    param([int]$Port)
+
+    $connections = @(
+        Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    )
+    if ($connections.Count -eq 0) {
+        return @()
+    }
+
+    $owners = @()
+    $processIds = @(
+        $connections |
+            Select-Object -ExpandProperty OwningProcess -Unique
+    )
+
+    foreach ($processId in $processIds) {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+        $owners += [pscustomobject]@{
+            ProcessId      = [int]$processId
+            Name           = if ($proc) { [string]$proc.Name } else { '' }
+            ExecutablePath = if ($proc) { [string]$proc.ExecutablePath } else { '' }
+            CommandLine    = if ($proc) { [string]$proc.CommandLine } else { '' }
+        }
+    }
+
+    return $owners
+}
+
+function Format-PortOwnerSummary {
+    param([object[]]$Owners)
+
+    $lines = @()
+    foreach ($owner in @($Owners)) {
+        $parts = @("PID $($owner.ProcessId)")
+        if ($owner.Name) {
+            $parts += $owner.Name
+        }
+        if ($owner.ExecutablePath) {
+            $parts += $owner.ExecutablePath
+        }
+        $lines += ('- ' + ($parts -join ' | '))
+    }
+
+    return ($lines -join [Environment]::NewLine)
+}
+
+function Ensure-CaddyPortAvailable {
+    param([int]$Port)
+
+    $owners = @(Get-ListeningPortOwners -Port $Port)
+    if ($owners.Count -eq 0) {
+        return
+    }
+
+    $caddyOwners = @(
+        $owners | Where-Object {
+            $name = ([string]$_.Name).Trim()
+            $name -and $name.Equals('caddy.exe', [System.StringComparison]::OrdinalIgnoreCase)
+        }
+    )
+
+    if ($caddyOwners.Count -ne $owners.Count) {
+        $summary = Format-PortOwnerSummary -Owners $owners
+        throw (
+            "Local HTTP port $Port is already occupied by another process. " +
+            "This project uses http://127.0.0.1:$Port for Caddy (frontend + /api reverse proxy).`n" +
+            $summary
+        )
+    }
+
+    Write-Warn "Port $Port is already occupied by a stale Caddy process. Stopping it before restart..."
+    foreach ($owner in $caddyOwners) {
+        try {
+            Stop-Process -Id $owner.ProcessId -Force -ErrorAction Stop
+        } catch {
+            $errorMessage = $_.Exception.Message
+            if ($errorMessage -match 'Access is denied') {
+                throw (
+                    "Failed to stop stale Caddy process on port $Port (PID $($owner.ProcessId)): access denied. " +
+                    "Another elevated Caddy instance is already bound to http://127.0.0.1:$Port. " +
+                    "Stop that process from an Administrator PowerShell or run this launcher elevated."
+                )
+            }
+            throw "Failed to stop stale Caddy process on port $Port (PID $($owner.ProcessId)): $errorMessage"
+        }
+    }
+
+    Start-Sleep -Seconds 1
+
+    $remainingOwners = @(Get-ListeningPortOwners -Port $Port)
+    if ($remainingOwners.Count -gt 0) {
+        $summary = Format-PortOwnerSummary -Owners $remainingOwners
+        throw "Port $Port is still occupied after stopping stale Caddy.`n$summary"
+    }
+
+    Write-Ok "Freed local TCP port $Port from stale Caddy"
 }
 
 function Start-BackgroundProcess {
@@ -707,6 +809,9 @@ $frpcErr  = Join-Path $runtimeDir 'frpc.err.log'
 $cloudOut = Join-Path $runtimeDir 'cloudflared.out.log'
 $cloudErr = Join-Path $runtimeDir 'cloudflared.err.log'
 
+# Make sure the local HTTP entrypoint is free before starting anything else.
+Ensure-CaddyPortAvailable -Port $caddyLocalPort
+
 # API (use batch wrapper to activate venv properly)
 $apiBat = Join-Path $backendDir 'run-api.bat'
 $apiProcess = Start-BackgroundProcess -Name 'Flask API' `
@@ -808,14 +913,14 @@ if (-not (Wait-ForHttp 'http://127.0.0.1:5000/health' 50 1)) {
 Write-Ok 'API server - OK'
 
 Write-Step 'Waiting for Caddy...'
-if (-not (Wait-ForHttp 'http://127.0.0.1:8080/' 30 1)) {
+if (-not (Wait-ForHttp "http://127.0.0.1:$caddyLocalPort/" 30 1)) {
     Write-Fail 'Caddy not responding!'
     throw 'Caddy check failed.'
 }
 Write-Ok 'Caddy - OK'
 
 Write-Step 'Checking API routing through Caddy...'
-if (-not (Wait-ForHttp 'http://127.0.0.1:8080/api/health' 20 1)) {
+if (-not (Wait-ForHttp "http://127.0.0.1:$caddyLocalPort/api/health" 20 1)) {
     Write-Fail 'API routing through Caddy not working!'
     throw 'Caddy API routing check failed.'
 }
@@ -868,7 +973,7 @@ Write-Host '========================================================' -Foregroun
 Write-Host '          SERVER STARTED SUCCESSFULLY!                   ' -ForegroundColor Green
 Write-Host '========================================================' -ForegroundColor Green
 Write-Host ''
-Write-Host "  Local site:    http://127.0.0.1:8080" -ForegroundColor White
+Write-Host "  Local site:    http://127.0.0.1:$caddyLocalPort" -ForegroundColor White
 Write-Host "  Local API:     http://127.0.0.1:5000/health" -ForegroundColor White
 Write-Host "  External:      $publicOrigin" -ForegroundColor Cyan
 Write-Host "  External API:  $externalApiHealthUrl" -ForegroundColor Cyan
