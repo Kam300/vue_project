@@ -21,6 +21,43 @@
   <link
     href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,300..700,0..1,-50..200"
     rel="stylesheet">
+  <script>
+    (function(){
+      var cls = 'material-symbols-loaded';
+      var done = false;
+
+      function reveal() {
+        if (done) return;
+        done = true;
+        document.documentElement.classList.add(cls);
+      }
+
+      if (!document.fonts) { reveal(); return; }
+
+      // Listen for each batch of fonts that finishes loading
+      document.fonts.addEventListener('loadingdone', function(e) {
+        var faces = e.fontfaces || [];
+        for (var i = 0; i < faces.length; i++) {
+          if (faces[i].family === 'Material Symbols Outlined') {
+            reveal();
+            return;
+          }
+        }
+      });
+
+      // Also check after all initial fonts have settled (handles cached fonts)
+      document.fonts.ready.then(function() {
+        try {
+          if (document.fonts.check('20px "Material Symbols Outlined"')) {
+            reveal();
+          }
+        } catch(e) { /* font not registered yet, loadingdone will catch it */ }
+      });
+
+      // Ultimate fallback: show icons after 4s regardless
+      setTimeout(reveal, 4000);
+    })();
+  </script>
 </head>
 
 <body>

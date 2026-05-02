@@ -220,3 +220,13 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
 }
+
+/* ===== Material Symbols FOUT prevention ===== */
+/* Hide icon text until the font loads, preventing 'person', 'elderly' etc. flashing as plain text */
+.material-symbols-outlined {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+html.material-symbols-loaded .material-symbols-outlined {
+  opacity: 1;
+}
