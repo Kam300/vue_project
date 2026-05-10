@@ -2,6 +2,8 @@ import type {
   AuthBootstrapResponse,
   BackupMetaResponse,
   GeneratePdfResponse,
+  PdfV2OptionsResponse,
+  PdfV2Options,
   HealthResponse,
   ListFacesResponse,
   RecognizeFaceResponse,
@@ -316,6 +318,64 @@ export function generatePdf(payload: {
 
 export function buildPdfDownloadUrl(driveId: string): string {
   return `${apiBase}/download_pdf/${encodeURIComponent(driveId)}`
+}
+
+export function generatePdfV2(payload: {
+  members: unknown[]
+  page_format?: string
+  use_drive?: boolean
+  theme?: string
+  card_style?: string
+  layout?: string
+  options?: PdfV2Options
+}): Promise<GeneratePdfResponse> {
+  return request<GeneratePdfResponse>('/generate_pdf_v2', 'POST', {
+    body: JSON.stringify(payload),
+    headers: { 'Content-Type': 'application/json' }
+  })
+}
+
+export function fetchPdfV2Options(): Promise<PdfV2OptionsResponse> {
+  return request<PdfV2OptionsResponse>('/pdf_v2/options', 'GET')
+}
+
+export interface PdfV3Node {
+  id: string
+  memberId?: string
+  member?: Record<string, unknown>
+  x: number
+  y: number
+  width: number
+  height: number
+  style?: Record<string, unknown>
+}
+
+export interface PdfV3Edge {
+  from: string
+  to: string
+  from_side?: 'top' | 'bottom' | 'left' | 'right'
+  to_side?: 'top' | 'bottom' | 'left' | 'right'
+  style?: Record<string, unknown>
+}
+
+export function generatePdfV3(payload: {
+  nodes: PdfV3Node[]
+  edges?: PdfV3Edge[]
+  members?: unknown[]
+  page_format?: string
+  background?: unknown
+  title?: string
+  show_header?: boolean
+  show_footer?: boolean
+  theme?: string
+  font_family?: 'sans' | 'serif' | 'mono'
+  defaults?: Record<string, unknown>
+  use_drive?: boolean
+}): Promise<GeneratePdfResponse> {
+  return request<GeneratePdfResponse>('/generate_pdf_v3', 'POST', {
+    body: JSON.stringify(payload),
+    headers: { 'Content-Type': 'application/json' }
+  })
 }
 
 export function authBootstrap(payload: {

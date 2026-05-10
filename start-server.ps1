@@ -98,14 +98,15 @@ function Install-ViaWinget {
     )
 
     if (-not (Test-CommandExists 'winget')) {
-        Write-Fail "winget not found. Install $FriendlyName manually and re-run."
-        throw "Cannot install $FriendlyName - winget unavailable."
+        Write-Warn "winget not found. Trying direct download for $FriendlyName..."
+        return $false
     }
 
     Write-Step "Installing $FriendlyName via winget..."
     winget install --id $PackageId --accept-source-agreements --accept-package-agreements --silent
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to install $FriendlyName. Install manually."
+        Write-Warn "winget install failed for $FriendlyName."
+        return $false
     }
 
     # Refresh PATH for current session
@@ -113,7 +114,44 @@ function Install-ViaWinget {
     $userPath    = [Environment]::GetEnvironmentVariable('Path', 'User')
     $env:Path    = "$machinePath;$userPath"
 
-    Write-Ok "$FriendlyName installed"
+    Write-Ok "$FriendlyName installed via winget"
+    return $true
+}
+
+function Install-PythonDirect {
+    Write-Step 'Downloading Python 3.11 installer from python.org...'
+    $installerUrl = 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe'
+    $installerPath = Join-Path $env:TEMP 'python-3.11.9-amd64.exe'
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
+    } catch {
+        throw "Failed to download Python installer: $($_.Exception.Message)"
+    }
+
+    Write-Step 'Running Python installer (silent)...'
+    $installArgs = @('/quiet', 'InstallAllUsers=0', 'PrependPath=1', 'Include_test=0', 'Include_launcher=1')
+    $proc = Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait -PassThru
+    if ($proc.ExitCode -ne 0) {
+        throw "Python installer exited with code $($proc.ExitCode). Try installing manually from https://www.python.org/downloads/"
+    }
+
+    # Refresh PATH
+    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $userPath    = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path    = "$machinePath;$userPath"
+
+    # Also add common Python install locations
+    $pythonUserDir = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python311'
+    $pythonUserScripts = Join-Path $pythonUserDir 'Scripts'
+    Add-ToPath $pythonUserDir
+    Add-ToPath $pythonUserScripts
+
+    # Cleanup installer
+    Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+
+    Write-Ok 'Python 3.11 installed from python.org'
 }
 
 function Find-AndAddToPath {
@@ -580,9 +618,9 @@ $nodeFound = Find-AndAddToPath 'node' @(
 )
 if (-not $nodeFound) {
     Write-Warn 'Node.js not found, installing...'
-    Install-ViaWinget 'OpenJS.NodeJS.LTS' 'Node.js'
-    if (-not (Test-CommandExists 'node')) {
-        throw 'Node.js not found after install. Restart terminal and re-run.'
+    $installed = Install-ViaWinget 'OpenJS.NodeJS.LTS' 'Node.js'
+    if (-not $installed -and -not (Test-CommandExists 'node')) {
+        throw 'Node.js not found. Install manually from https://nodejs.org/ and re-run.'
     }
 }
 $nodeVersion = & node --version
@@ -602,7 +640,10 @@ Write-Ok 'npm found'
 $pythonCmd = Resolve-PythonCommand
 if (-not $pythonCmd) {
     Write-Warn 'Python not found, installing...'
-    Install-ViaWinget 'Python.Python.3.11' 'Python 3.11'
+    $wingetOk = Install-ViaWinget 'Python.Python.3.11' 'Python 3.11'
+    if (-not $wingetOk) {
+        Install-PythonDirect
+    }
     $pythonCmd = Resolve-PythonCommand
     if (-not $pythonCmd) {
         throw 'Python not found after install. Restart terminal and re-run.'
@@ -627,9 +668,9 @@ if ($wingetCaddy) {
 $caddyFound = Find-AndAddToPath 'caddy' $caddyPaths
 if (-not $caddyFound) {
     Write-Warn 'Caddy not found, installing...'
-    Install-ViaWinget 'CaddyServer.Caddy' 'Caddy Server'
-    if (-not (Test-CommandExists 'caddy')) {
-        throw 'Caddy not found after install. Restart terminal and re-run.'
+    $installed = Install-ViaWinget 'CaddyServer.Caddy' 'Caddy Server'
+    if (-not $installed -and -not (Test-CommandExists 'caddy')) {
+        throw 'Caddy not found. Install manually from https://caddyserver.com/download and re-run.'
     }
 }
 Write-Ok 'Caddy found'
@@ -640,9 +681,9 @@ if ($requestedNoTunnel) {
 } else {
     if (-not (Test-CommandExists 'cloudflared')) {
         Write-Warn 'cloudflared not found, installing...'
-        Install-ViaWinget 'Cloudflare.cloudflared' 'Cloudflare Tunnel'
-        if (-not (Test-CommandExists 'cloudflared')) {
-            throw 'cloudflared not found after install. Restart terminal and re-run.'
+        $installed = Install-ViaWinget 'Cloudflare.cloudflared' 'Cloudflare Tunnel'
+        if (-not $installed -and -not (Test-CommandExists 'cloudflared')) {
+            throw 'cloudflared not found. Install manually from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/ and re-run.'
         }
     }
     Write-Ok 'cloudflared found'

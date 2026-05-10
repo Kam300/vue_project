@@ -78,6 +78,58 @@ export interface GeneratePdfResponse {
   size?: number
   storage?: 'google_drive' | 'base64'
   pdf_base64?: string
+  version?: 'v2'
+}
+
+export interface PdfV2BackgroundConfig {
+  type: 'color' | 'gradient' | 'image'
+  color?: string
+  from?: string
+  to?: string
+  direction?: 'vertical' | 'horizontal' | 'diagonal'
+  src?: string
+  opacity?: number
+  fit?: 'cover' | 'contain' | 'stretch'
+}
+
+export interface PdfV2Options {
+  title?: string
+  subtitle?: string
+  show_photos?: boolean
+  show_dates?: boolean
+  show_patronymic?: boolean
+  show_social_roles?: boolean
+  show_footer?: boolean
+  show_subtitle?: boolean
+  accent_color?: string
+  text_color?: string
+  border_color?: string
+  line_color?: string
+  card_bg?: string
+  bg_from?: string
+  bg_to?: string
+  photo_shape?: 'circle' | 'rounded' | 'square'
+  connection_style?: 'orthogonal' | 'curve' | 'straight'
+  font_family?: 'sans' | 'serif' | 'mono'
+  show_tree?: boolean
+  show_leaves?: boolean
+  show_corners?: boolean
+  double_frame?: boolean
+  background?: PdfV2BackgroundConfig
+  page_format?: string
+}
+
+export interface PdfV2OptionsResponse {
+  success: boolean
+  error?: string
+  themes?: string[]
+  card_styles?: string[]
+  layouts?: string[]
+  photo_shapes?: string[]
+  connection_styles?: string[]
+  font_families?: string[]
+  page_formats?: string[]
+  background_types?: string[]
 }
 
 export interface BackupMetaResponse {

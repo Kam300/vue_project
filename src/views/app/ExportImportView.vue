@@ -1,10 +1,21 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { reactive, ref, onMounted, computed } from 'vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import AppIcon from '@/components/shared/AppIcon.vue'
+import ImageBackgroundCropper from '@/components/shared/ImageBackgroundCropper.vue'
+import PdfCanvasEditor from '@/components/shared/PdfCanvasEditor.vue'
+import type { CanvasState } from '@/components/shared/PdfCanvasEditor.vue'
 import { useMemberStore } from '@/stores/memberStore'
 import { addBackupAudit } from '@/db/repositories'
-import { generatePdf, buildPdfDownloadUrl } from '@/services/api'
+import {
+  generatePdf,
+  generatePdfV2,
+  generatePdfV3,
+  buildPdfDownloadUrl,
+  fetchPdfV2Options
+} from '@/services/api'
+import type { PdfV2Options, PdfV2BackgroundConfig } from '@/types/api'
+import type { PdfV3Node, PdfV3Edge } from '@/services/api'
 import { exportMembersToCsv, exportMembersToJson, importMembersFromJsonText } from '@/services/memberData'
 import { downloadBlob, downloadText, openLinkInNewTab } from '@/utils/download'
 
@@ -28,6 +39,123 @@ const pdfSettings = reactive({
   title: 'Семейное древо',
   photo_quality: 'medium'
 })
+
+// --- PDF v2: гибкие настройки стиля ---
+const pdfVersion = ref<'v1' | 'v2' | 'v3'>('v1')
+
+const pdfV2Options = reactive({
+  themes: ['vintage', 'modern', 'minimal', 'dark', 'sakura', 'forest', 'paper'],
+  cardStyles: ['classic', 'modern', 'minimal', 'dark', 'photo', 'poster'],
+  layouts: ['generations', 'compact', 'centered'],
+  photoShapes: ['circle', 'rounded', 'square'],
+  connectionStyles: ['orthogonal', 'curve', 'straight'],
+  fontFamilies: ['sans', 'serif', 'mono'],
+  backgroundTypes: ['color', 'gradient', 'image']
+})
+
+const THEME_LABELS: Record<string, string> = {
+  vintage: 'Винтаж',
+  modern: 'Современная',
+  minimal: 'Минимализм',
+  dark: 'Тёмная',
+  sakura: 'Сакура',
+  forest: 'Лес',
+  paper: 'Бумага'
+}
+
+const CARD_STYLE_LABELS: Record<string, string> = {
+  classic: 'Классика',
+  modern: 'Современный',
+  minimal: 'Минимал',
+  dark: 'Тёмный',
+  photo: 'С фото',
+  poster: 'Постер'
+}
+
+const LAYOUT_LABELS: Record<string, string> = {
+  generations: 'Поколения',
+  compact: 'Компакт',
+  centered: 'По центру'
+}
+
+const PHOTO_SHAPE_LABELS: Record<string, string> = {
+  circle: 'Круг',
+  rounded: 'Скруглённый',
+  square: 'Квадрат'
+}
+
+const CONNECTION_LABELS: Record<string, string> = {
+  orthogonal: 'Прямые углы',
+  curve: 'Изогнутые',
+  straight: 'Прямая линия'
+}
+
+const FONT_LABELS: Record<string, string> = {
+  sans: 'Без засечек',
+  serif: 'С засечками',
+  mono: 'Моноширинный'
+}
+
+const BG_TYPE_LABELS: Record<string, string> = {
+  color: 'Однотонный',
+  gradient: 'Градиент',
+  image: 'Изображение'
+}
+
+const pdfV2 = reactive({
+  theme: 'vintage',
+  card_style: 'classic',
+  layout: 'generations',
+  accent_color: '#96723d',
+  photo_shape: 'circle' as 'circle' | 'rounded' | 'square',
+  connection_style: 'orthogonal' as 'orthogonal' | 'curve' | 'straight',
+  font_family: 'serif' as 'sans' | 'serif' | 'mono',
+  show_social_roles: true,
+  show_footer: true,
+  show_subtitle: true,
+  show_tree: true,
+  show_leaves: true,
+  show_corners: true,
+  double_frame: true,
+  use_custom_bg: false,
+  bg_type: 'gradient' as 'color' | 'gradient' | 'image',
+  bg_color: '#f7f0d9',
+  bg_from: '#f7f0d9',
+  bg_to: '#e8e0c8',
+  bg_direction: 'vertical' as 'vertical' | 'horizontal' | 'diagonal',
+  bg_image_src: '',
+  bg_opacity: 1
+})
+
+// Палитра быстрых акцентов — зависит от темы
+const themeAccents: Record<string, string[]> = {
+  vintage: ['#96723d', '#b8862f', '#7a5d32', '#a84a2a'],
+  modern: ['#3b82f6', '#10b981', '#f43f5e', '#8b5cf6'],
+  minimal: ['#111111', '#555555', '#888888', '#222222'],
+  dark: ['#60a5fa', '#34d399', '#fbbf24', '#f472b6'],
+  sakura: ['#e11d74', '#f472b6', '#ec4899', '#be185d'],
+  forest: ['#2f7a3d', '#256b2a', '#4a8b52', '#78a87a'],
+  paper: ['#000000', '#222222', '#444444', '#666666']
+}
+
+const currentAccentPalette = computed(() => themeAccents[pdfV2.theme] || themeAccents.vintage)
+
+// Размеры страниц PDF в точках (pt) — для соотношения сторон кроппера.
+// ReportLab использует A4=595.276×841.890, A3=841.890×1190.551.
+const PAGE_SIZES_PT: Record<string, [number, number]> = {
+  A4: [595, 842],
+  A4_LANDSCAPE: [842, 595],
+  A3: [842, 1191],
+  A3_LANDSCAPE: [1191, 842]
+}
+
+const pageAspect = computed(() => {
+  const [w, h] = PAGE_SIZES_PT[pdfSettings.format] || PAGE_SIZES_PT.A4_LANDSCAPE
+  return { width: w, height: h }
+})
+
+// --- PDF v3: canvas state ---
+const canvasState = ref<CanvasState>({ nodes: [], edges: [], defaults: {} })
 
 function clearMessages(): void {
   status.value = ''
@@ -103,16 +231,48 @@ async function exportPdfFile(): Promise<void> {
       photoBase64: member.photoUri || ''
     }))
 
-    const response = await generatePdf({
-      members: membersForPdf,
-      format: pdfSettings.format,
-      use_drive: pdfSettings.use_drive,
-      show_photos: pdfSettings.show_photos,
-      show_dates: pdfSettings.show_dates,
-      show_patronymic: pdfSettings.show_patronymic,
-      title: pdfSettings.title,
-      photo_quality: pdfSettings.photo_quality
-    })
+    const response =
+      pdfVersion.value === 'v3'
+        ? await (async () => {
+            if (!canvasState.value.nodes.length) {
+              throw new Error('Добавьте хотя бы одну карточку на холст.')
+            }
+            const bg = pdfV2.use_custom_bg ? buildPdfV2Options().background : undefined
+            return generatePdfV3({
+              nodes: canvasState.value.nodes as PdfV3Node[],
+              edges: (canvasState.value.edges || []) as PdfV3Edge[],
+              members: membersForPdf,
+              page_format: pdfSettings.format,
+              title: pdfSettings.title,
+              show_header: false,
+              show_footer: pdfV2.show_footer,
+              theme: pdfV2.theme,
+              font_family: pdfV2.font_family,
+              background: bg,
+              use_drive: pdfSettings.use_drive,
+              defaults: canvasState.value.defaults || {}
+            })
+          })()
+        : pdfVersion.value === 'v2'
+        ? await generatePdfV2({
+            members: membersForPdf,
+            page_format: pdfSettings.format,
+            use_drive: pdfSettings.use_drive,
+            theme: pdfV2.theme,
+            card_style: pdfV2.card_style,
+            layout: pdfV2.layout,
+            options: buildPdfV2Options()
+          })
+        : await generatePdf({
+            members: membersForPdf,
+            format: pdfSettings.format,
+            use_drive: pdfSettings.use_drive,
+            show_photos: pdfSettings.show_photos,
+            show_dates: pdfSettings.show_dates,
+            show_patronymic: pdfSettings.show_patronymic,
+            title: pdfSettings.title,
+            photo_quality: pdfSettings.photo_quality
+          })
 
     if (!response.success) {
       throw new Error(response.error || 'PDF генерация завершилась с ошибкой')
@@ -142,6 +302,70 @@ async function exportPdfFile(): Promise<void> {
     pdfBusy.value = false
   }
 }
+
+function buildPdfV2Options(): PdfV2Options {
+  const options: PdfV2Options = {
+    title: pdfSettings.title,
+    show_photos: pdfSettings.show_photos,
+    show_dates: pdfSettings.show_dates,
+    show_patronymic: pdfSettings.show_patronymic,
+    show_social_roles: pdfV2.show_social_roles,
+    show_footer: pdfV2.show_footer,
+    show_subtitle: pdfV2.show_subtitle,
+    accent_color: pdfV2.accent_color,
+    photo_shape: pdfV2.photo_shape,
+    connection_style: pdfV2.connection_style,
+    font_family: pdfV2.font_family,
+    show_tree: pdfV2.show_tree,
+    show_leaves: pdfV2.show_leaves,
+    show_corners: pdfV2.show_corners,
+    double_frame: pdfV2.double_frame,
+    page_format: pdfSettings.format
+  }
+  if (pdfV2.use_custom_bg) {
+    const bg: PdfV2BackgroundConfig = { type: pdfV2.bg_type }
+    if (pdfV2.bg_type === 'color') {
+      bg.color = pdfV2.bg_color
+    } else if (pdfV2.bg_type === 'gradient') {
+      bg.from = pdfV2.bg_from
+      bg.to = pdfV2.bg_to
+      bg.direction = pdfV2.bg_direction
+    } else if (pdfV2.bg_type === 'image') {
+      bg.src = pdfV2.bg_image_src
+      bg.opacity = pdfV2.bg_opacity
+      // Изображение уже подогнано под соотношение страницы в кроппере —
+      // используем stretch, чтобы заполнить без искажения.
+      bg.fit = 'stretch'
+    }
+    options.background = bg
+  }
+  return options
+}
+
+async function onBgImagePicked(_event: Event): Promise<void> {
+  // legacy — кроппер теперь сам управляет состоянием pdfV2.bg_image_src
+}
+
+function applyAccentFromPalette(color: string): void {
+  pdfV2.accent_color = color
+}
+
+onMounted(async () => {
+  try {
+    const resp = await fetchPdfV2Options()
+    if (resp.success) {
+      if (resp.themes?.length) pdfV2Options.themes = resp.themes
+      if (resp.card_styles?.length) pdfV2Options.cardStyles = resp.card_styles
+      if (resp.layouts?.length) pdfV2Options.layouts = resp.layouts
+      if (resp.photo_shapes?.length) pdfV2Options.photoShapes = resp.photo_shapes
+      if (resp.connection_styles?.length) pdfV2Options.connectionStyles = resp.connection_styles
+      if (resp.font_families?.length) pdfV2Options.fontFamilies = resp.font_families
+      if (resp.background_types?.length) pdfV2Options.backgroundTypes = resp.background_types
+    }
+  } catch {
+    // Фолбэк на локальные дефолты — не фатально
+  }
+})
 
 function openImportPicker(): void {
   importInput.value?.click()
@@ -229,6 +453,38 @@ async function onDrop(e: DragEvent): Promise<void> {
             <AppIcon name="description" :size="19" />
             PDF через backend
           </h3>
+
+          <!-- Переключатель версий генератора -->
+          <div class="pdf-version-tabs">
+            <button
+              type="button"
+              class="pdf-version-tab"
+              :class="{ active: pdfVersion === 'v1' }"
+              @click="pdfVersion = 'v1'"
+            >
+              <AppIcon name="description" :size="16" />
+              Стандартный
+            </button>
+            <button
+              type="button"
+              class="pdf-version-tab"
+              :class="{ active: pdfVersion === 'v2' }"
+              @click="pdfVersion = 'v2'"
+            >
+              <AppIcon name="palette" :size="16" />
+              Стилизованный (v2)
+            </button>
+            <button
+              type="button"
+              class="pdf-version-tab"
+              :class="{ active: pdfVersion === 'v3' }"
+              @click="pdfVersion = 'v3'"
+            >
+              <AppIcon name="dashboard_customize" :size="16" />
+              Конструктор (v3)
+            </button>
+          </div>
+
           <div class="form-grid">
             <div class="field">
               <label>Формат</label>
@@ -239,7 +495,7 @@ async function onDrop(e: DragEvent): Promise<void> {
                 <option value="A3">A3 Portrait</option>
               </select>
             </div>
-            <div class="field">
+            <div class="field" v-if="pdfVersion === 'v1'">
               <label>Качество фото</label>
               <select v-model="pdfSettings.photo_quality">
                 <option value="low">Low</option>
@@ -277,10 +533,344 @@ async function onDrop(e: DragEvent): Promise<void> {
             </label>
           </div>
 
+          <!-- Блок настроек v2: темы, стили, фон -->
+          <div v-if="pdfVersion === 'v2'" class="pdf-v2-box">
+            <div class="pdf-v2-section">
+              <div class="pdf-v2-section-title">
+                <AppIcon name="palette" :size="16" />
+                <span>Тема оформления</span>
+              </div>
+              <div class="chip-grid">
+                <button
+                  v-for="themeKey in pdfV2Options.themes"
+                  :key="themeKey"
+                  type="button"
+                  class="chip"
+                  :class="{ active: pdfV2.theme === themeKey }"
+                  @click="pdfV2.theme = themeKey; applyAccentFromPalette(currentAccentPalette[0])"
+                >
+                  {{ THEME_LABELS[themeKey] || themeKey }}
+                </button>
+              </div>
+            </div>
+
+            <div class="pdf-v2-section">
+              <div class="pdf-v2-section-title">
+                <AppIcon name="style" :size="16" />
+                <span>Стиль карточек</span>
+              </div>
+              <div class="chip-grid">
+                <button
+                  v-for="styleKey in pdfV2Options.cardStyles"
+                  :key="styleKey"
+                  type="button"
+                  class="chip"
+                  :class="{ active: pdfV2.card_style === styleKey }"
+                  @click="pdfV2.card_style = styleKey"
+                >
+                  {{ CARD_STYLE_LABELS[styleKey] || styleKey }}
+                </button>
+              </div>
+            </div>
+
+            <div class="form-grid">
+              <div class="field">
+                <label>Раскладка</label>
+                <select v-model="pdfV2.layout">
+                  <option v-for="k in pdfV2Options.layouts" :key="k" :value="k">
+                    {{ LAYOUT_LABELS[k] || k }}
+                  </option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Форма фото</label>
+                <select v-model="pdfV2.photo_shape">
+                  <option v-for="k in pdfV2Options.photoShapes" :key="k" :value="k">
+                    {{ PHOTO_SHAPE_LABELS[k] || k }}
+                  </option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Тип связей</label>
+                <select v-model="pdfV2.connection_style">
+                  <option v-for="k in pdfV2Options.connectionStyles" :key="k" :value="k">
+                    {{ CONNECTION_LABELS[k] || k }}
+                  </option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Шрифт</label>
+                <select v-model="pdfV2.font_family">
+                  <option v-for="k in pdfV2Options.fontFamilies" :key="k" :value="k">
+                    {{ FONT_LABELS[k] || k }}
+                  </option>
+                </select>
+              </div>
+            </div>
+
+            <div class="pdf-v2-section">
+              <div class="pdf-v2-section-title">
+                <AppIcon name="colorize" :size="16" />
+                <span>Акцентный цвет</span>
+              </div>
+              <div class="accent-row">
+                <input
+                  v-model="pdfV2.accent_color"
+                  type="color"
+                  class="color-input"
+                  aria-label="Акцентный цвет"
+                />
+                <div class="accent-palette">
+                  <button
+                    v-for="color in currentAccentPalette"
+                    :key="color"
+                    type="button"
+                    class="accent-swatch"
+                    :class="{ active: pdfV2.accent_color === color }"
+                    :style="{ background: color }"
+                    @click="applyAccentFromPalette(color)"
+                    aria-label="Применить цвет"
+                  />
+                </div>
+                <code class="accent-code">{{ pdfV2.accent_color }}</code>
+              </div>
+            </div>
+
+            <div class="toggle-row">
+              <label class="toggle-switch">
+                <input v-model="pdfV2.show_social_roles" type="checkbox" />
+                <span class="toggle-track"></span>
+                <span>Соц. роли</span>
+              </label>
+              <label class="toggle-switch">
+                <input v-model="pdfV2.show_subtitle" type="checkbox" />
+                <span class="toggle-track"></span>
+                <span>Подзаголовок</span>
+              </label>
+              <label class="toggle-switch">
+                <input v-model="pdfV2.show_footer" type="checkbox" />
+                <span class="toggle-track"></span>
+                <span>Футер</span>
+              </label>
+              <label class="toggle-switch">
+                <input v-model="pdfV2.show_tree" type="checkbox" />
+                <span class="toggle-track"></span>
+                <span>Дерево</span>
+              </label>
+              <label class="toggle-switch">
+                <input v-model="pdfV2.show_leaves" type="checkbox" />
+                <span class="toggle-track"></span>
+                <span>Листочки</span>
+              </label>
+              <label class="toggle-switch">
+                <input v-model="pdfV2.show_corners" type="checkbox" />
+                <span class="toggle-track"></span>
+                <span>Уголки</span>
+              </label>
+              <label class="toggle-switch">
+                <input v-model="pdfV2.double_frame" type="checkbox" />
+                <span class="toggle-track"></span>
+                <span>Двойная рамка</span>
+              </label>
+            </div>
+
+            <div class="pdf-v2-section">
+              <div class="pdf-v2-section-title">
+                <AppIcon name="image" :size="16" />
+                <span>Фон</span>
+                <label class="toggle-switch compact">
+                  <input v-model="pdfV2.use_custom_bg" type="checkbox" />
+                  <span class="toggle-track"></span>
+                  <span>{{ pdfV2.use_custom_bg ? 'Свой' : 'Из темы' }}</span>
+                </label>
+              </div>
+
+              <div v-if="pdfV2.use_custom_bg" class="custom-bg">
+                <div class="chip-grid">
+                  <button
+                    v-for="type in pdfV2Options.backgroundTypes"
+                    :key="type"
+                    type="button"
+                    class="chip"
+                    :class="{ active: pdfV2.bg_type === type }"
+                    @click="pdfV2.bg_type = type as any"
+                  >
+                    {{ BG_TYPE_LABELS[type] || type }}
+                  </button>
+                </div>
+
+                <div v-if="pdfV2.bg_type === 'color'" class="form-grid">
+                  <div class="field">
+                    <label>Цвет фона</label>
+                    <input v-model="pdfV2.bg_color" type="color" class="color-input" />
+                  </div>
+                </div>
+
+                <div v-else-if="pdfV2.bg_type === 'gradient'" class="form-grid">
+                  <div class="field">
+                    <label>От</label>
+                    <input v-model="pdfV2.bg_from" type="color" class="color-input" />
+                  </div>
+                  <div class="field">
+                    <label>К</label>
+                    <input v-model="pdfV2.bg_to" type="color" class="color-input" />
+                  </div>
+                  <div class="field">
+                    <label>Направление</label>
+                    <select v-model="pdfV2.bg_direction">
+                      <option value="vertical">Вертикально</option>
+                      <option value="horizontal">Горизонтально</option>
+                      <option value="diagonal">Диагональ</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div v-else-if="pdfV2.bg_type === 'image'" class="bg-image-field">
+                  <div class="field full-width">
+                    <label>Фоновое изображение</label>
+                    <ImageBackgroundCropper
+                      v-model="pdfV2.bg_image_src"
+                      :aspect-width="pageAspect.width"
+                      :aspect-height="pageAspect.height"
+                      :output-width="1800"
+                      :quality="0.9"
+                    />
+                    <small class="help hint-subtle">
+                      Соотношение автоматически подстраивается под формат PDF «{{ pdfSettings.format }}».
+                      Потяните изображение мышью, колёсиком мыши — масштаб.
+                    </small>
+                  </div>
+                  <div class="field" v-if="pdfV2.bg_image_src">
+                    <label>Прозрачность: {{ Math.round(pdfV2.bg_opacity * 100) }}%</label>
+                    <input
+                      v-model.number="pdfV2.bg_opacity"
+                      type="range"
+                      min="0.1"
+                      max="1"
+                      step="0.05"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Блок настроек v3: визуальный конструктор -->
+          <div v-if="pdfVersion === 'v3'" class="pdf-v2-box">
+            <div class="pdf-v2-section">
+              <div class="pdf-v2-section-title">
+                <AppIcon name="dashboard_customize" :size="16" />
+                <span>Холст конструктора</span>
+              </div>
+              <PdfCanvasEditor
+                v-model="canvasState"
+                :members="memberStore.members"
+                :page-width="pageAspect.width"
+                :page-height="pageAspect.height"
+              />
+            </div>
+
+            <div class="form-grid">
+              <div class="field">
+                <label>Тема фона</label>
+                <select v-model="pdfV2.theme">
+                  <option v-for="k in pdfV2Options.themes" :key="k" :value="k">
+                    {{ THEME_LABELS[k] || k }}
+                  </option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Шрифт по умолчанию</label>
+                <select v-model="pdfV2.font_family">
+                  <option v-for="k in pdfV2Options.fontFamilies" :key="k" :value="k">
+                    {{ FONT_LABELS[k] || k }}
+                  </option>
+                </select>
+              </div>
+            </div>
+
+            <div class="toggle-row">
+              <label class="toggle-switch">
+                <input v-model="pdfV2.show_footer" type="checkbox" />
+                <span class="toggle-track"></span>
+                <span>Футер с датой</span>
+              </label>
+              <label class="toggle-switch">
+                <input v-model="pdfV2.use_custom_bg" type="checkbox" />
+                <span class="toggle-track"></span>
+                <span>Свой фон</span>
+              </label>
+            </div>
+
+            <div v-if="pdfV2.use_custom_bg" class="custom-bg">
+              <div class="chip-grid">
+                <button
+                  v-for="type in pdfV2Options.backgroundTypes"
+                  :key="type"
+                  type="button"
+                  class="chip"
+                  :class="{ active: pdfV2.bg_type === type }"
+                  @click="pdfV2.bg_type = type as any"
+                >
+                  {{ BG_TYPE_LABELS[type] || type }}
+                </button>
+              </div>
+
+              <div v-if="pdfV2.bg_type === 'color'" class="form-grid">
+                <div class="field">
+                  <label>Цвет фона</label>
+                  <input v-model="pdfV2.bg_color" type="color" class="color-input" />
+                </div>
+              </div>
+
+              <div v-else-if="pdfV2.bg_type === 'gradient'" class="form-grid">
+                <div class="field">
+                  <label>От</label>
+                  <input v-model="pdfV2.bg_from" type="color" class="color-input" />
+                </div>
+                <div class="field">
+                  <label>К</label>
+                  <input v-model="pdfV2.bg_to" type="color" class="color-input" />
+                </div>
+                <div class="field">
+                  <label>Направление</label>
+                  <select v-model="pdfV2.bg_direction">
+                    <option value="vertical">Вертикально</option>
+                    <option value="horizontal">Горизонтально</option>
+                    <option value="diagonal">Диагональ</option>
+                  </select>
+                </div>
+              </div>
+
+              <div v-else-if="pdfV2.bg_type === 'image'" class="bg-image-field">
+                <div class="field full-width">
+                  <label>Фоновое изображение</label>
+                  <ImageBackgroundCropper
+                    v-model="pdfV2.bg_image_src"
+                    :aspect-width="pageAspect.width"
+                    :aspect-height="pageAspect.height"
+                    :output-width="1800"
+                    :quality="0.9"
+                  />
+                </div>
+                <div class="field" v-if="pdfV2.bg_image_src">
+                  <label>Прозрачность: {{ Math.round(pdfV2.bg_opacity * 100) }}%</label>
+                  <input
+                    v-model.number="pdfV2.bg_opacity"
+                    type="range"
+                    min="0.1"
+                    max="1"
+                    step="0.05"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="btn-row">
             <button class="btn-action primary" :disabled="pdfBusy" @click="exportPdfFile">
               <AppIcon :name="pdfBusy ? 'hourglass_top' : 'description'" :size="18" />
-              {{ pdfBusy ? 'Генерация PDF...' : 'Экспорт PDF' }}
+              {{ pdfBusy ? 'Генерация PDF...' : pdfVersion === 'v3' ? 'Экспорт PDF (конструктор)' : pdfVersion === 'v2' ? 'Экспорт PDF (стиль)' : 'Экспорт PDF' }}
             </button>
           </div>
 
@@ -532,5 +1122,203 @@ async function onDrop(e: DragEvent): Promise<void> {
 .spin-slow {
   animation: spin-slow-anim 1.8s linear infinite;
   display: inline-block;
+}
+
+/* ============ PDF v2 UI ============ */
+
+.pdf-version-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 18px;
+  padding: 4px;
+  background: var(--input-bg);
+  border: 1px solid var(--color-glass-border);
+  border-radius: var(--radius-md);
+}
+
+.pdf-version-tab {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-weight: 500;
+  font-size: 0.9rem;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.pdf-version-tab:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.pdf-version-tab.active {
+  background: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent);
+  box-shadow: var(--shadow-glow);
+}
+
+.pdf-v2-box {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px dashed var(--color-glass-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.pdf-v2-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pdf-v2-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+}
+
+.pdf-v2-section-title .toggle-switch.compact {
+  margin-left: auto;
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.chip-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  padding: 8px 14px;
+  border: 1px solid var(--color-glass-border);
+  border-radius: 999px;
+  background: var(--input-bg);
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast), transform 0.1s;
+}
+
+.chip:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+  background: var(--input-hover-bg);
+  transform: translateY(-1px);
+}
+
+.chip.active {
+  background: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent);
+  box-shadow: var(--shadow-glow);
+}
+
+.accent-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.color-input {
+  width: 48px;
+  height: 36px;
+  border: 1px solid var(--color-glass-border);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+  cursor: pointer;
+  padding: 2px;
+}
+
+.accent-palette {
+  display: flex;
+  gap: 6px;
+}
+
+.accent-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid var(--color-glass-border);
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.12s, border-color 0.12s;
+}
+
+.accent-swatch:hover {
+  transform: scale(1.1);
+}
+
+.accent-swatch.active {
+  border-color: var(--color-text);
+  transform: scale(1.15);
+  box-shadow: var(--shadow-glow);
+}
+
+.accent-code {
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+  border: 1px solid var(--color-glass-border);
+  font-family: ui-monospace, 'SF Mono', monospace;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+}
+
+.custom-bg {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-glass-border);
+}
+
+.bg-image-field {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bg-image-field .help {
+  color: var(--color-text-muted);
+  font-size: 0.78rem;
+  margin-top: 4px;
+}
+
+.bg-image-field .hint-subtle {
+  display: block;
+  margin-top: 8px;
+  line-height: 1.4;
+}
+
+@media (max-width: 640px) {
+  .pdf-version-tabs {
+    flex-direction: column;
+  }
+  .accent-row {
+    gap: 8px;
+  }
 }
 </style>

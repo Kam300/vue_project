@@ -2313,6 +2313,217 @@ def generate_pdf():
         return make_response_json({'success': False, 'error': str(e)}, 500)
 
 
+# ========================================
+# PDF v2 - Гибкая генерация с темами/стилями
+# ========================================
+
+@app.route('/api/generate_pdf_v2', methods=['POST'])
+@app.route('/generate_pdf_v2', methods=['POST'])
+def generate_pdf_v2():
+    """Генерация PDF со всеми настройками кастомизации.
+
+    Поддерживаемые поля JSON-тела:
+      members (required): список членов семьи
+      page_format: 'A4' | 'A4_LANDSCAPE' | 'A3' | 'A3_LANDSCAPE'
+      use_drive: bool (загружать ли в Google Drive)
+      theme: 'vintage' | 'modern' | 'minimal' | 'dark' | 'sakura' | 'forest' | 'paper'
+      card_style: 'classic' | 'modern' | 'minimal' | 'dark' | 'photo' | 'poster'
+      layout: 'generations' | 'compact' | 'centered'
+      options: dict со всеми полями PdfV2Config
+               (title, accent_color, photo_shape, connection_style,
+                show_photos, show_dates, background и т.д.)
+    """
+    try:
+        from pdf_v2 import render_family_tree_pdf_v2, PdfV2Config
+
+        data = request.json or {}
+        members = data.get('members', [])
+        if not members:
+            return make_response_json({'success': False, 'error': 'Нет данных'}, 400)
+
+        use_drive = data.get('use_drive', True)
+        page_format = data.get('page_format') or data.get('format', 'A4_LANDSCAPE')
+
+        options = dict(data.get('options') or {})
+        # Параметры верхнего уровня тоже принимаем (для совместимости с существующим UI)
+        for key in ('title', 'show_photos', 'show_dates', 'show_patronymic',
+                    'show_social_roles', 'show_footer', 'show_subtitle',
+                    'photo_shape', 'connection_style', 'accent_color',
+                    'font_family', 'background'):
+            if key in data and key not in options:
+                options[key] = data[key]
+        options.setdefault('page_format', page_format)
+
+        theme = data.get('theme', options.get('theme', 'vintage'))
+        card_style = data.get('card_style', options.get('card_style', 'classic'))
+        layout = data.get('layout', options.get('layout', 'generations'))
+
+        logger.info(
+            "PDF v2: theme=%s style=%s layout=%s options=%s",
+            theme, card_style, layout,
+            {k: v for k, v in options.items() if k != 'background'},
+        )
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"family_tree_v2_{timestamp}.pdf"
+        filepath = os.path.join(TEMP_DIR, filename)
+
+        render_family_tree_pdf_v2(
+            members=members,
+            filename=filepath,
+            theme=theme,
+            card_style=card_style,
+            layout=layout,
+            options=options,
+        )
+
+        pdf_size = os.path.getsize(filepath)
+        logger.info(f"PDF v2 создан: {filename}, размер: {pdf_size} байт")
+
+        add_event('📄', f"PDF v2 создан: {len(members)} чел., тема «{theme}», стиль «{card_style}», {round(pdf_size/1024)} КБ", 'success')
+
+        if use_drive and GOOGLE_DRIVE_AVAILABLE:
+            drive_result = upload_to_google_drive(filepath, filename)
+            if drive_result:
+                drive_id = drive_result['drive_id']
+                return make_response_json({
+                    'success': True,
+                    'filename': filename,
+                    'download_url': f"/download_pdf/{drive_id}",
+                    'direct_drive_url': drive_result['download_url'],
+                    'drive_id': drive_id,
+                    'view_url': drive_result.get('view_url'),
+                    'size': pdf_size,
+                    'storage': 'google_drive',
+                    'version': 'v2',
+                })
+            logger.warning("Google Drive загрузка не удалась, возвращаем base64")
+
+        with open(filepath, 'rb') as f:
+            pdf_base64 = base64.b64encode(f.read()).decode('utf-8')
+
+        return make_response_json({
+            'success': True,
+            'filename': filename,
+            'pdf_base64': pdf_base64,
+            'size': pdf_size,
+            'storage': 'base64',
+            'version': 'v2',
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка PDF v2: {e}")
+        import traceback
+        traceback.print_exc()
+        return make_response_json({'success': False, 'error': str(e)}, 500)
+
+
+@app.route('/api/pdf_v2/options', methods=['GET'])
+@app.route('/pdf_v2/options', methods=['GET'])
+def pdf_v2_options():
+    """Возвращает доступные темы/стили/раскладки — для фронта."""
+    try:
+        from pdf_v2 import THEMES, CARD_STYLES, LAYOUTS
+        return make_response_json({
+            'success': True,
+            'themes': list(THEMES.keys()),
+            'card_styles': list(CARD_STYLES.keys()),
+            'layouts': list(LAYOUTS.keys()),
+            'photo_shapes': ['circle', 'rounded', 'square'],
+            'connection_styles': ['orthogonal', 'curve', 'straight'],
+            'font_families': ['sans', 'serif', 'mono'],
+            'page_formats': ['A4', 'A4_LANDSCAPE', 'A3', 'A3_LANDSCAPE'],
+            'background_types': ['color', 'gradient', 'image'],
+        })
+    except Exception as e:
+        return make_response_json({'success': False, 'error': str(e)}, 500)
+
+
+# ========================================
+# PDF v3 - Визуальный конструктор (draw.io-like)
+# ========================================
+
+@app.route('/api/generate_pdf_v3', methods=['POST'])
+@app.route('/generate_pdf_v3', methods=['POST'])
+def generate_pdf_v3():
+    """Рендерит PDF по абсолютным координатам из визуального редактора.
+
+    JSON-тело:
+      page_format: 'A4' | 'A4_LANDSCAPE' | 'A3' | 'A3_LANDSCAPE'
+      nodes: [{id, memberId?, member?, x, y, width, height, style?}]
+      edges: [{from, to, from_side?, to_side?, style?}]
+      members: [{id, firstName, ...}]   (опциональная карта, если nodes ссылаются по memberId)
+      background: {type, ...}
+      title?: str
+      show_header?: bool
+      show_footer?: bool
+      theme?, font_family?, defaults?
+      use_drive?: bool
+    """
+    try:
+        from pdf_v3 import render_family_tree_pdf_v3
+
+        data = request.json or {}
+        nodes = data.get('nodes') or []
+        if not nodes:
+            return make_response_json({'success': False, 'error': 'Нет узлов'}, 400)
+
+        members_list = data.get('members') or []
+        members_map = {}
+        for m in members_list:
+            mid = m.get('id')
+            if mid is not None:
+                members_map[str(mid)] = m
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"family_tree_v3_{timestamp}.pdf"
+        filepath = os.path.join(TEMP_DIR, filename)
+
+        render_family_tree_pdf_v3(
+            nodes=nodes,
+            edges=data.get('edges') or [],
+            members_map=members_map,
+            filename=filepath,
+            page_format=data.get('page_format', 'A4_LANDSCAPE'),
+            background=data.get('background'),
+            title=data.get('title'),
+            show_header=bool(data.get('show_header', False)),
+            show_footer=bool(data.get('show_footer', True)),
+            theme=data.get('theme', 'paper'),
+            font_family=data.get('font_family', 'serif'),
+            defaults=data.get('defaults') or {},
+        )
+
+        pdf_size = os.path.getsize(filepath)
+        logger.info(f"PDF v3 создан: {filename}, {pdf_size} байт, nodes={len(nodes)}")
+        add_event('📄', f"PDF v3: {len(nodes)} узлов, {round(pdf_size/1024)} КБ", 'success')
+
+        use_drive = data.get('use_drive', True)
+        if use_drive and GOOGLE_DRIVE_AVAILABLE:
+            drive_result = upload_to_google_drive(filepath, filename)
+            if drive_result:
+                drive_id = drive_result['drive_id']
+                return make_response_json({
+                    'success': True, 'filename': filename,
+                    'download_url': f"/download_pdf/{drive_id}",
+                    'direct_drive_url': drive_result['download_url'],
+                    'drive_id': drive_id, 'view_url': drive_result.get('view_url'),
+                    'size': pdf_size, 'storage': 'google_drive', 'version': 'v3',
+                })
+
+        with open(filepath, 'rb') as f:
+            pdf_base64 = base64.b64encode(f.read()).decode('utf-8')
+        return make_response_json({
+            'success': True, 'filename': filename,
+            'pdf_base64': pdf_base64, 'size': pdf_size,
+            'storage': 'base64', 'version': 'v3',
+        })
+    except Exception as e:
+        logger.error(f"Ошибка PDF v3: {e}")
+        import traceback; traceback.print_exc()
+        return make_response_json({'success': False, 'error': str(e)}, 500)
+
+
 @app.route('/api/download_pdf/<drive_id>', methods=['GET'])
 @app.route('/download_pdf/<drive_id>', methods=['GET'])
 def download_pdf_proxy(drive_id):
