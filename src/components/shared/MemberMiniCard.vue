@@ -18,7 +18,7 @@ defineProps<{
       </div>
     </div>
     <div class="meta">
-      <h3>{{ member.firstName }} {{ member.lastName }}</h3>
+      <h3>{{ [member.lastName, member.firstName, member.patronymic].filter(Boolean).join(' ') }}</h3>
       <p>{{ ROLE_LABELS[member.role] }}</p>
       <small v-if="member.socialRoles" class="tradition-line">{{ member.socialRoles }}</small>
       <small v-if="member.birthDate">{{ member.birthDate }}</small>
@@ -80,6 +80,9 @@ defineProps<{
 .meta h3 {
   font-size: 0.95rem;
   font-weight: 600;
+  line-height: 1.2;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .meta p {

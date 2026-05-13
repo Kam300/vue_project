@@ -116,6 +116,28 @@ function loadFile(file: File): void {
   reader.readAsDataURL(file)
 }
 
+/**
+ * Загрузить изображение по URL (например, готовый фон из /backgrounds/).
+ * Скачиваем как blob, превращаем в File и пропускаем через обычный loadFile,
+ * чтобы состояние кроппера (offsets, scale) инициализировалось корректно.
+ */
+async function loadFromUrl(url: string): Promise<void> {
+  loadError.value = ''
+  try {
+    const resp = await fetch(url)
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const blob = await resp.blob()
+    const mime = blob.type.startsWith('image/') ? blob.type : 'image/png'
+    const name = url.split('/').pop() || 'preset.png'
+    const file = new File([blob], name, { type: mime })
+    loadFile(file)
+  } catch (e) {
+    loadError.value = 'Не удалось загрузить готовый фон: ' + (e as Error).message
+  }
+}
+
+defineExpose({ loadFromUrl })
+
 /** Обновляем размеры превью по текущему контейнеру. */
 function measureStage(): void {
   const el = stageRef.value

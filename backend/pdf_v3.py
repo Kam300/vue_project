@@ -110,6 +110,18 @@ def _draw_avatar(c, x, y, size, shape, accent):
               cx + size * 0.28, cy - size * 0.05, fill=1, stroke=0)
 
 
+def _autofit_font_size(c, text: str, font: str, max_w: float,
+                       target: float, min_size: float, max_size: float) -> float:
+    """Подбирает размер шрифта чтобы text занимал ~target ширины (но не шире max_w)."""
+    if not text:
+        return target
+    w_at_1 = c.stringWidth(text, font, 1.0)
+    if w_at_1 <= 0:
+        return target
+    ideal = target / w_at_1
+    return max(min_size, min(max_size, ideal))
+
+
 def _draw_node(c, node: dict, members_map: dict, fonts: dict,
                page_h: float, defaults: dict) -> None:
     x = float(node['x'])
@@ -133,7 +145,6 @@ def _draw_node(c, node: dict, members_map: dict, fonts: dict,
     font_family = style.get('font_family') or defaults.get('font_family', 'serif')
     reg, bold, italic = _fonts_for(font_family)
 
-    # Тень
     if style.get('shadow', True):
         c.saveState()
         try: c.setFillAlpha(0.22)
@@ -148,61 +159,99 @@ def _draw_node(c, node: dict, members_map: dict, fonts: dict,
     c.setLineWidth(border_w)
     c.roundRect(x, y, w, h, radius, fill=0, stroke=1)
 
-    pad = max(4, radius * 0.6)
+    pad = max(6, min(14, radius * 0.8 + w * 0.04))
     inner_w = w - 2 * pad
-    cur_y = y + h - pad
+    inner_h = h - 2 * pad
 
     show_photo = style.get('show_photo', True)
     show_dates = style.get('show_dates', True)
     show_patr = style.get('show_patronymic', True)
     show_role = style.get('show_role', True)
 
+    # --- Подготавливаем строки текста ---
+    name = ((member.get('lastName') or '') + ' ' + (member.get('firstName') or '')).strip()
+    patr = (member.get('patronymic') or '').strip() if show_patr else ''
+    role = ROLE_NAMES.get((member.get('role') or 'OTHER').upper(), 'Родственник') if show_role else ''
+    birth = (member.get('birthDate') or '').strip() if show_dates else ''
+    death = (member.get('deathDate') or '').strip() if show_dates else ''
+    date_line = ''
+    if show_dates and (birth or death):
+        date_line = f'{birth} — {death}' if birth and death else birth or f'✝ {death}'
+
+    text_lines = [(t, 'name') for t in ([name] if name else [])]
+    if patr: text_lines.append((patr, 'patr'))
+    if role: text_lines.append((role, 'role'))
+    if date_line: text_lines.append((date_line, 'date'))
+
+    # --- Распределение: фото vs текст ---
+    # Количество строк -> минимальная доля для текста
+    n_lines = len(text_lines)
     if show_photo:
-        ps = min(w * 0.42, h * 0.52)
+        # чем меньше строк, тем крупнее фото; иначе — разумный баланс
+        if n_lines <= 1: photo_frac = 0.72
+        elif n_lines == 2: photo_frac = 0.62
+        elif n_lines == 3: photo_frac = 0.55
+        else: photo_frac = 0.48
+        photo_frac = float(style.get('photo_frac', photo_frac))
+        photo_area_h = inner_h * photo_frac
+        text_area_h = inner_h - photo_area_h - 6
+    else:
+        photo_area_h = 0
+        text_area_h = inner_h
+
+    cur_y = y + h - pad
+
+    # Рисуем фото квадратом в отведённой зоне
+    if show_photo and photo_area_h > 12:
+        ps = min(photo_area_h, inner_w)  # квадрат
         px = x + (w - ps) / 2
         py = cur_y - ps
         _draw_photo(c, member.get('photoBase64') or member.get('photoUri') or '',
                     px, py, ps, style.get('photo_shape', 'circle'), accent)
         cur_y = py - 4
 
-    base_s = max(7, min(20, 10 * font_scale))
-    name_s = base_s + 1
-    role_s = base_s
-    det_s = max(6, base_s - 1.5)
+    if n_lines == 0 or text_area_h <= 8:
+        return
 
-    name = ((member.get('lastName') or '') + ' ' + (member.get('firstName') or '')).strip()
-    if name:
-        name = _clip_text(c, name, bold, name_s, inner_w)
-        c.setFillColorRGB(*text_main)
-        c.setFont(bold, name_s)
-        c.drawCentredString(x + w / 2, cur_y - name_s, name)
-        cur_y -= name_s + 2
+    # Распределяем текст по оставшейся высоте, подбирая размеры шрифтов.
+    # Базовые размеры, масштабированные общим font_scale.
+    base = 10 * font_scale
+    weights = {
+        'name': max(10, base + 2),
+        'patr': max(7, base - 1),
+        'role': max(8, base),
+        'date': max(7, base - 1.5),
+    }
 
-    if show_patr:
-        patr = (member.get('patronymic') or '').strip()
-        if patr:
-            patr = _clip_text(c, patr, reg, det_s, inner_w)
-            c.setFillColorRGB(*_mix(text_main, (1, 1, 1), 0.25))
-            c.setFont(reg, det_s)
-            c.drawCentredString(x + w / 2, cur_y - det_s, patr)
-            cur_y -= det_s + 1
+    # Сумма «естественных» высот + межстрочные
+    def line_gap(kind): return 2 if kind == 'name' else 1
+    natural_total = sum(weights[k] for _, k in text_lines) + sum(line_gap(k) for _, k in text_lines)
 
-    if show_role:
-        role = ROLE_NAMES.get((member.get('role') or 'OTHER').upper(), 'Родственник')
-        c.setFillColorRGB(*role_color)
-        c.setFont(italic, role_s)
-        c.drawCentredString(x + w / 2, cur_y - role_s, role)
-        cur_y -= role_s + 1
+    # Если не помещается — уменьшаем все размеры пропорционально
+    if natural_total > text_area_h:
+        k = text_area_h / natural_total
+        for key in weights:
+            weights[key] = max(6, weights[key] * k)
 
-    if show_dates:
-        birth = (member.get('birthDate') or '').strip()
-        death = (member.get('deathDate') or '').strip()
-        if birth or death:
-            line = (f'{birth} — {death}' if birth and death else birth or f'✝ {death}')
-            line = _clip_text(c, line, reg, det_s, inner_w)
-            c.setFillColorRGB(*_mix(text_main, (1, 1, 1), 0.4))
-            c.setFont(reg, det_s)
-            c.drawCentredString(x + w / 2, cur_y - det_s, line)
+    # Отрисовка, авто-подгонка ширины имени
+    for text, kind in text_lines:
+        size = weights[kind]
+        font = bold if kind == 'name' else (italic if kind == 'role' else reg)
+        if kind == 'name':
+            # Масштабируем имя так, чтобы оно заняло 90% ширины (но ограничено size + 50%)
+            size = _autofit_font_size(c, text, font, inner_w * 0.92,
+                                       target=inner_w * 0.92,
+                                       min_size=max(7, size * 0.7),
+                                       max_size=min(size * 1.6, inner_h * 0.28))
+        display = _clip_text(c, text, font, size, inner_w)
+        if kind == 'name': color = text_main
+        elif kind == 'role': color = role_color
+        elif kind == 'patr': color = _mix(text_main, (1, 1, 1), 0.25)
+        else: color = _mix(text_main, (1, 1, 1), 0.4)
+        c.setFillColorRGB(*color)
+        c.setFont(font, size)
+        c.drawCentredString(x + w / 2, cur_y - size, display)
+        cur_y -= size + line_gap(kind)
 
 
 def _anchor(node: dict, side: str, page_h: float) -> tuple[float, float]:
@@ -306,6 +355,8 @@ def render_family_tree_pdf_v3(
     )
     _draw_background(c, width, height, cfg)
 
+    # Если хотим заголовок поверх и пользовательские карточки наезжают — сдвинем их.
+    header_reserve = 90 if (show_header and title) else 0
     if show_header and title:
         _draw_header(c, width, height, cfg)
 
@@ -323,11 +374,26 @@ def render_family_tree_pdf_v3(
     edge_defaults = {'kind': 'orthogonal', 'color': '#7a5d32', 'width': 1.4, 'marker': True}
 
     nodes_by_id = {n.get('id'): n for n in nodes if n.get('id')}
+
+    # Если задан header_reserve, сдвигаем узлы которые попадают в зону заголовка.
+    shifted_nodes = nodes
+    if header_reserve > 0:
+        # найти минимальный y среди узлов
+        min_y = min((float(n.get('y', 0)) for n in nodes), default=0)
+        if min_y < header_reserve:
+            dy = header_reserve - min_y
+            shifted_nodes = []
+            for n in nodes:
+                nn = dict(n)
+                nn['y'] = float(n.get('y', 0)) + dy
+                shifted_nodes.append(nn)
+            nodes_by_id = {n.get('id'): n for n in shifted_nodes if n.get('id')}
+
     for e in (edges or []):
         _draw_edge(c, e, nodes_by_id, height, edge_defaults)
 
     fonts = {f: _fonts_for(f) for f in {font_family, 'sans', 'serif', 'mono'}}
-    for n in nodes:
+    for n in shifted_nodes:
         _draw_node(c, n, members_map, fonts, height, node_defaults)
 
     if show_footer:

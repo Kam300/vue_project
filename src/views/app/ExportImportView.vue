@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref, onMounted, computed } from 'vue'
+import { reactive, ref, onMounted, computed, nextTick } from 'vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import AppIcon from '@/components/shared/AppIcon.vue'
 import ImageBackgroundCropper from '@/components/shared/ImageBackgroundCropper.vue'
@@ -102,6 +102,71 @@ const BG_TYPE_LABELS: Record<string, string> = {
   image: 'Изображение'
 }
 
+// Готовые фоны из public/backgrounds. URL будет вида `/backgrounds/<файл>`.
+interface BgPreset {
+  id: string
+  label: string
+  file: string
+  category: 'season' | 'parchment'
+}
+
+const BG_PRESETS: BgPreset[] = [
+  { id: 'summer',     label: 'Лето',         file: 'лето.png',        category: 'season' },
+  { id: 'autumn',     label: 'Осень',        file: 'Осень.png',       category: 'season' },
+  { id: 'parchment1', label: 'Пергамент 1',  file: 'пергамент1.png',  category: 'parchment' },
+  { id: 'parchment2', label: 'Пергамент 2',  file: 'пергамент2.png',  category: 'parchment' },
+  { id: 'parchment3', label: 'Пергамент 3',  file: 'пергамент3.png',  category: 'parchment' }
+]
+
+function bgPresetUrl(p: BgPreset): string {
+  // encodeURI оставляет `/` нетронутым, но корректно кодирует кириллицу в имени файла.
+  return encodeURI(`/backgrounds/${p.file}`)
+}
+
+const selectedBgPresetId = ref<string | null>(null)
+const bgCropperV2 = ref<InstanceType<typeof ImageBackgroundCropper> | null>(null)
+const bgCropperV3 = ref<InstanceType<typeof ImageBackgroundCropper> | null>(null)
+
+async function applyBgPreset(preset: BgPreset): Promise<void> {
+  selectedBgPresetId.value = preset.id
+  pdfV2.use_custom_bg = true
+  pdfV2.bg_type = 'image'
+  const url = bgPresetUrl(preset)
+
+  // Автоподбор ориентации PDF под ориентацию картинки, чтобы кроппер не
+  // обрезал её. Сохраняем базу (A4/A3) и переключаем только portrait/landscape.
+  try {
+    const { w, h } = await probeImageSize(url)
+    if (w && h) {
+      const imgLandscape = w >= h
+      const cur = pdfSettings.format
+      const base = cur.startsWith('A3') ? 'A3' : 'A4'
+      const target = imgLandscape ? `${base}_LANDSCAPE` : base
+      if (target !== cur && PAGE_SIZES_PT[target]) {
+        pdfSettings.format = target
+      }
+    }
+  } catch { /* не критично, продолжаем */ }
+
+  // Ждём рендер DOM, чтобы v-if='bg_type === image' отработал.
+  await nextTick()
+  const target = pdfVersion.value === 'v3' ? bgCropperV3.value : bgCropperV2.value
+  if (target?.loadFromUrl) {
+    await target.loadFromUrl(url)
+  } else {
+    pdfV2.bg_image_src = url
+  }
+}
+
+function probeImageSize(url: string): Promise<{ w: number; h: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight })
+    img.onerror = () => reject(new Error('probe failed'))
+    img.src = url
+  })
+}
+
 const pdfV2 = reactive({
   theme: 'vintage',
   card_style: 'classic',
@@ -117,6 +182,7 @@ const pdfV2 = reactive({
   show_leaves: true,
   show_corners: true,
   double_frame: true,
+  show_title_on_page: false,
   use_custom_bg: false,
   bg_type: 'gradient' as 'color' | 'gradient' | 'image',
   bg_color: '#f7f0d9',
@@ -244,7 +310,7 @@ async function exportPdfFile(): Promise<void> {
               members: membersForPdf,
               page_format: pdfSettings.format,
               title: pdfSettings.title,
-              show_header: false,
+              show_header: pdfV2.show_title_on_page,
               show_footer: pdfV2.show_footer,
               theme: pdfV2.theme,
               font_family: pdfV2.font_family,
@@ -686,6 +752,24 @@ async function onDrop(e: DragEvent): Promise<void> {
               </div>
 
               <div v-if="pdfV2.use_custom_bg" class="custom-bg">
+                <div class="bg-presets">
+                  <div class="bg-presets-title">Готовые фоны</div>
+                  <div class="bg-presets-grid">
+                    <button
+                      v-for="p in BG_PRESETS"
+                      :key="p.id"
+                      type="button"
+                      class="bg-preset"
+                      :class="{ active: selectedBgPresetId === p.id && pdfV2.bg_type === 'image' }"
+                      :title="p.label"
+                      @click="applyBgPreset(p)"
+                    >
+                      <img :src="bgPresetUrl(p)" :alt="p.label" loading="lazy" />
+                      <span class="bg-preset-label">{{ p.label }}</span>
+                    </button>
+                  </div>
+                </div>
+
                 <div class="chip-grid">
                   <button
                     v-for="type in pdfV2Options.backgroundTypes"
@@ -729,6 +813,7 @@ async function onDrop(e: DragEvent): Promise<void> {
                   <div class="field full-width">
                     <label>Фоновое изображение</label>
                     <ImageBackgroundCropper
+                      ref="bgCropperV2"
                       v-model="pdfV2.bg_image_src"
                       :aspect-width="pageAspect.width"
                       :aspect-height="pageAspect.height"
@@ -791,6 +876,11 @@ async function onDrop(e: DragEvent): Promise<void> {
 
             <div class="toggle-row">
               <label class="toggle-switch">
+                <input v-model="pdfV2.show_title_on_page" type="checkbox" />
+                <span class="toggle-track"></span>
+                <span>Заголовок в PDF</span>
+              </label>
+              <label class="toggle-switch">
                 <input v-model="pdfV2.show_footer" type="checkbox" />
                 <span class="toggle-track"></span>
                 <span>Футер с датой</span>
@@ -803,6 +893,24 @@ async function onDrop(e: DragEvent): Promise<void> {
             </div>
 
             <div v-if="pdfV2.use_custom_bg" class="custom-bg">
+              <div class="bg-presets">
+                <div class="bg-presets-title">Готовые фоны</div>
+                <div class="bg-presets-grid">
+                  <button
+                    v-for="p in BG_PRESETS"
+                    :key="p.id"
+                    type="button"
+                    class="bg-preset"
+                    :class="{ active: selectedBgPresetId === p.id && pdfV2.bg_type === 'image' }"
+                    :title="p.label"
+                    @click="applyBgPreset(p)"
+                  >
+                    <img :src="bgPresetUrl(p)" :alt="p.label" loading="lazy" />
+                    <span class="bg-preset-label">{{ p.label }}</span>
+                  </button>
+                </div>
+              </div>
+
               <div class="chip-grid">
                 <button
                   v-for="type in pdfV2Options.backgroundTypes"
@@ -846,6 +954,7 @@ async function onDrop(e: DragEvent): Promise<void> {
                 <div class="field full-width">
                   <label>Фоновое изображение</label>
                   <ImageBackgroundCropper
+                    ref="bgCropperV3"
                     v-model="pdfV2.bg_image_src"
                     :aspect-width="pageAspect.width"
                     :aspect-height="pageAspect.height"
@@ -1293,6 +1402,77 @@ async function onDrop(e: DragEvent): Promise<void> {
   background: var(--color-surface);
   border-radius: var(--radius-md);
   border: 1px solid var(--color-glass-border);
+}
+
+.bg-presets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bg-presets-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.bg-presets-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+}
+
+.bg-preset {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 4px;
+  background: var(--input-bg);
+  border: 1px solid var(--color-glass-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  overflow: hidden;
+  transition:
+    border-color var(--transition-fast),
+    transform var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+
+.bg-preset img {
+  width: 100%;
+  max-height: 120px;
+  object-fit: contain;
+  border-radius: calc(var(--radius-sm) - 2px);
+  display: block;
+  background: var(--color-bg-alt);
+}
+
+.bg-preset-label {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bg-preset:hover {
+  border-color: var(--color-accent);
+  transform: translateY(-1px);
+}
+
+.bg-preset.active {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px var(--color-accent);
+}
+
+.bg-preset.active .bg-preset-label {
+  color: var(--color-text);
+  font-weight: 600;
 }
 
 .bg-image-field {

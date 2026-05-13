@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Full server launch for "Family Tree" on any Windows PC.
     Auto-installs all dependencies and starts all services.
@@ -189,6 +189,27 @@ function Resolve-PythonCommand {
                 return 'py'
             }
         } catch {}
+    }
+
+    # Fallback: РїСЂСЏРјРѕР№ РїСѓС‚СЊ Рє Python (РїРѕСЃР»Рµ РїРµСЂРµРёРјРµРЅРѕРІР°РЅРёСЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ PATH РјРѕР¶РµС‚ РЅРµ РѕР±РЅРѕРІРёС‚СЊСЃСЏ)
+    $directPaths = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe",
+        "C:\Python311\python.exe",
+        "C:\Python312\python.exe"
+    )
+    foreach ($p in $directPaths) {
+        if (Test-Path $p) {
+            try {
+                & $p --version *> $null
+                if ($LASTEXITCODE -eq 0) {
+                    # Р”РѕР±Р°РІР»СЏРµРј РІ PATH С‚РµРєСѓС‰РµР№ СЃРµСЃСЃРёРё
+                    Add-ToPath (Split-Path $p -Parent)
+                    return $p
+                }
+            } catch {}
+        }
     }
 
     return $null
@@ -587,7 +608,7 @@ if (Test-Path $pidsFile) {
     Write-Ok 'No previous processes found'
 }
 
-# Убиваем все оставшиеся Python-процессы (чтобы не было зомби со старым кодом)
+# РЈР±РёРІР°РµРј РІСЃРµ РѕСЃС‚Р°РІС€РёРµСЃСЏ Python-РїСЂРѕС†РµСЃСЃС‹ (С‡С‚РѕР±С‹ РЅРµ Р±С‹Р»Рѕ Р·РѕРјР±Рё СЃРѕ СЃС‚Р°СЂС‹Рј РєРѕРґРѕРј)
 Stop-MatchingProcesses -ProcessName 'python' -FriendlyName 'Python' -DelaySeconds 2 -MatchTerms @(
     $backendDir,
     'telegram_service.py'
@@ -736,6 +757,28 @@ if (-not (Test-Path $backendEnvFile)) {
 }
 
 $pyPrefix = if ($pythonCmd -eq 'py') { @('-3') } else { @() }
+
+$venvCfg = Join-Path $venvDir 'pyvenv.cfg'
+
+# Remove broken venv (missing pyvenv.cfg or pointing to non-existent Python)
+if ((Test-Path $venvDir) -and (-not (Test-Path $venvCfg))) {
+    Write-Warn 'venv directory exists but pyvenv.cfg is missing - recreating...'
+    Remove-Item -Recurse -Force $venvDir -ErrorAction SilentlyContinue
+}
+if (Test-Path $venvCfg) {
+    $cfgLines = Get-Content $venvCfg -ErrorAction SilentlyContinue
+    $cfgHome = ''
+    foreach ($line in $cfgLines) {
+        if ($line -match '^\s*home\s*=\s*(.+)$') {
+            $cfgHome = $Matches[1].Trim()
+            break
+        }
+    }
+    if ($cfgHome -and -not (Test-Path (Join-Path $cfgHome 'python.exe'))) {
+        Write-Warn "venv points to missing Python at '$cfgHome' - recreating..."
+        Remove-Item -Recurse -Force $venvDir -ErrorAction SilentlyContinue
+    }
+}
 
 if (-not (Test-Path $venvPython)) {
     Write-Step 'Creating Python virtual environment...'

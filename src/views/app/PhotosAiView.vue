@@ -199,10 +199,22 @@ async function runRecognition(task: PhotoTask): Promise<void> {
     }
 
     task.selectedMemberId = localMemberId
-    task.status = 'recognized'
+    // Если сервер пометил результат как сомнительный (похожий 2-й кандидат) —
+    // не авторизуем автоматически, просим пользователя подтвердить выбор.
+    if (candidate.ambiguous) {
+      task.status = 'manual'
+      task.error = 'Близкие кандидаты, требуется подтверждение вручную'
+    } else {
+      task.status = 'recognized'
+    }
   } catch (reason) {
     task.status = 'failed'
-    task.error = (reason as Error).message || 'Ошибка распознавания'
+    const e = reason as Error & { response?: { data?: { error?: string; details?: string } } }
+    const serverMsg = e?.response?.data?.error
+    const details = e?.response?.data?.details
+    task.error = [serverMsg, details, e.message].filter(Boolean).join(' — ') || 'Ошибка распознавания'
+    // eslint-disable-next-line no-console
+    console.error('[PhotosAI] recognize error:', reason)
   }
 }
 

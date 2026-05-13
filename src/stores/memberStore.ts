@@ -14,6 +14,9 @@ import {
   upsertMember
 } from '@/db/repositories'
 import { imageSha256, makePerceptualHash } from '@/utils/image'
+import { useAppStore } from '@/stores/appStore'
+import { deleteFace, clearAllFaces } from '@/services/api'
+import { toServerMemberId } from '@/services/familySync'
 
 export const useMemberStore = defineStore('members', () => {
   const members = ref<FamilyMember[]>([])
@@ -40,11 +43,28 @@ export const useMemberStore = defineStore('members', () => {
   }
 
   async function removeMember(memberId: number): Promise<void> {
+    // Удаляем лицо с сервера распознавания (параллельно с локальным удалением).
+    // Ошибка сети не должна блокировать локальное удаление.
+    try {
+      const appStore = useAppStore()
+      const serverId = toServerMemberId(appStore.settings.deviceId, memberId)
+      await deleteFace(serverId)
+    } catch (reason) {
+      // eslint-disable-next-line no-console
+      console.warn('[memberStore] deleteFace on server failed:', reason)
+    }
     await deleteMember(memberId)
     await refresh()
   }
 
   async function removeAllMembers(): Promise<void> {
+    try {
+      const appStore = useAppStore()
+      await clearAllFaces(appStore.settings.deviceId)
+    } catch (reason) {
+      // eslint-disable-next-line no-console
+      console.warn('[memberStore] clearAllFaces on server failed:', reason)
+    }
     await deleteAllMembers()
     await refresh()
   }

@@ -163,6 +163,14 @@ def env_bool(name, default):
     return default
 
 
+def env_str(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    stripped = raw.strip()
+    return stripped if stripped else default
+
+
 def env_csv(name, default=None):
     raw = os.environ.get(name, "")
     items = [item.strip() for item in raw.split(",") if item.strip()]
@@ -326,10 +334,24 @@ FACE_MODEL = 'cnn' if CUDA_ENABLED else 'hog'
 NUMBER_OF_TIMES_TO_UPSAMPLE = max(0, env_int('FACE_UPSAMPLE', 1))
 FALLBACK_UPSAMPLE = max(NUMBER_OF_TIMES_TO_UPSAMPLE, env_int('FACE_UPSAMPLE_FALLBACK', 2))
 
-# Количество jitters при кодировании лица (больше = точнее, но медленнее)
-# 1 = быстро, 100 = очень точно но медленно
-# Для GPU можно увеличить до 10-20 без потери скорости
-NUM_JITTERS = 1  # 1 = быстро, уменьшено для скорости
+# Количество jitters при кодировании лица (больше = точнее, но медленнее).
+# Регистрация эталона — делается один раз на человека, можно позволить 10+.
+# Распознавание на групповом фото — делается часто, держим меньшее значение.
+# Управляется переменными окружения FACE_REGISTER_JITTERS / FACE_RECOGNIZE_JITTERS.
+NUM_JITTERS = max(1, env_int('FACE_RECOGNIZE_JITTERS', 1))
+REGISTER_JITTERS = max(NUM_JITTERS, env_int('FACE_REGISTER_JITTERS', 10))
+
+# Модель вычисления дескрипторов. 'small' — 5-точечная, быстрая.
+# 'large' — 68-точечная, заметно точнее (рекомендуется для эталонов).
+ENCODING_MODEL = env_str('FACE_ENCODING_MODEL', 'large')
+
+# Порог "похожести" (меньше — строже). По умолчанию face_recognition использует 0.6,
+# для групп родственников оптимум 0.48..0.52 — меньше ложных срабатываний.
+DEFAULT_MATCH_THRESHOLD = float(env_str('FACE_MATCH_THRESHOLD', '0.50'))
+
+# Минимальный отрыв лучшего кандидата от второго (защита от "одинаково похожи").
+# Если best_distance + MATCH_MARGIN > second_best_distance, считаем распознавание сомнительным.
+MATCH_MARGIN = float(env_str('FACE_MATCH_MARGIN', '0.05'))
 
 # Дополнительные оптимизации для GPU
 BATCH_SIZE = 128  # Размер батча для обработки (больше = быстрее на GPU)
@@ -344,6 +366,10 @@ face_detection_cache = {}
 CACHE_MAX_SIZE = 100
 
 logger.info(f"Face Recognition настроен: model={FACE_MODEL}, CUDA={'включен' if CUDA_ENABLED else 'выключен'}")
+logger.info(
+    f"Face encoding: register_jitters={REGISTER_JITTERS}, recognize_jitters={NUM_JITTERS}, "
+    f"model={ENCODING_MODEL}, threshold={DEFAULT_MATCH_THRESHOLD}, margin={MATCH_MARGIN}"
+)
 if USE_CUDA and not CUDA_ENABLED:
     logger.warning(
         f"CUDA requested but unavailable, fallback to CPU/HOG. "
@@ -1854,8 +1880,15 @@ def register_face():
                 'error': 'На фото обнаружено несколько лиц. Используйте фото с одним человеком'
             }, 400)
 
-        # Получаем кодировку лица (num_jitters для точности)
-        face_encodings = face_recognition.face_encodings(image, face_locations, num_jitters=NUM_JITTERS)
+        # Получаем кодировку лица. При регистрации эталона используем
+        # повышенное число jitters и модель 'large' (68-точечная) — точность
+        # лучше, а стоит это только один раз на человека.
+        face_encodings = face_recognition.face_encodings(
+            image,
+            face_locations,
+            num_jitters=REGISTER_JITTERS,
+            model=ENCODING_MODEL
+        )
 
         if len(face_encodings) == 0:
             return make_response_json({
@@ -1971,8 +2004,15 @@ def recognize_face():
                 'error': 'На фото не обнаружено лиц'
             }, 400)
 
-        # Получаем кодировки всех лиц на фото
-        face_encodings = face_recognition.face_encodings(image, face_locations, num_jitters=NUM_JITTERS)
+        # Получаем кодировки всех лиц на фото. Для распознавания используем
+        # ту же модель (large), что и для регистрации, иначе дескрипторы
+        # будут несопоставимы.
+        face_encodings = face_recognition.face_encodings(
+            image,
+            face_locations,
+            num_jitters=NUM_JITTERS,
+            model=ENCODING_MODEL
+        )
 
         # Результаты распознавания
         results = []
@@ -1997,38 +2037,49 @@ def recognize_face():
         known_ids = [str(member_id) for member_id, _ in known_faces]
         known_names = [info['name'] for _, info in known_faces]
 
+        # Используем порог клиента, но не больше жёсткого серверного порога
+        effective_threshold = min(float(threshold), DEFAULT_MATCH_THRESHOLD)
+
         # Проверяем каждое лицо на фото
         for face_encoding, face_location in zip(face_encodings, face_locations):
-            # Сравниваем с известными лицами
-            matches = face_recognition.compare_faces(
-                known_encodings,
-                face_encoding,
-                tolerance=threshold
-            )
-
-            # Вычисляем расстояния
             face_distances = face_recognition.face_distance(known_encodings, face_encoding)
+            if len(face_distances) == 0:
+                continue
 
-            if True in matches:
-                # Находим лучшее совпадение
-                best_match_index = np.argmin(face_distances)
+            sorted_idx = np.argsort(face_distances)
+            best_idx = int(sorted_idx[0])
+            best_distance = float(face_distances[best_idx])
 
-                if matches[best_match_index]:
-                    member_id = known_ids[best_match_index]
-                    member_name = known_names[best_match_index]
-                    confidence = 1 - face_distances[best_match_index]
+            # Второй кандидат для проверки отрыва.
+            second_distance = float(face_distances[int(sorted_idx[1])]) if len(sorted_idx) > 1 else 1.0
 
-                    results.append({
-                        'member_id': member_id,
-                        'member_name': member_name,
-                        'confidence': float(confidence),
-                        'location': {
-                            'top': face_location[0],
-                            'right': face_location[1],
-                            'bottom': face_location[2],
-                            'left': face_location[3]
-                        }
-                    })
+            # Основной критерий: дистанция ниже порога.
+            if best_distance > effective_threshold:
+                continue
+
+            # Margin-check: если второй кандидат почти так же близок — результат
+            # ненадёжен, пропускаем чтобы не вводить пользователя в заблуждение.
+            margin = second_distance - best_distance
+            ambiguous = margin < MATCH_MARGIN
+
+            member_id = known_ids[best_idx]
+            member_name = known_names[best_idx]
+            confidence = 1 - best_distance
+
+            results.append({
+                'member_id': member_id,
+                'member_name': member_name,
+                'confidence': float(confidence),
+                'distance': best_distance,
+                'margin': float(margin),
+                'ambiguous': bool(ambiguous),
+                'location': {
+                    'top': face_location[0],
+                    'right': face_location[1],
+                    'bottom': face_location[2],
+                    'left': face_location[3]
+                }
+            })
 
         if len(results) == 0:
             return make_response_json({

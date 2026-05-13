@@ -39,6 +39,9 @@ export interface RecognitionResult {
   member_id: string
   member_name: string
   confidence: number
+  distance?: number
+  margin?: number
+  ambiguous?: boolean
   location: {
     top: number
     right: number
