@@ -1,8 +1,21 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/appStore'
 import AppIcon from '@/components/shared/AppIcon.vue'
+import OfflineBanner from '@/components/shared/OfflineBanner.vue'
+import PendingChangesBadge from '@/components/sync/PendingChangesBadge.vue'
+import ConflictDialog from '@/components/sync/ConflictDialog.vue'
+import RecoveryDialog from '@/components/sync/RecoveryDialog.vue'
+import PendingChangesDetail from '@/components/sync/PendingChangesDetail.vue'
+import {
+  start as startSyncTicker,
+  stop as stopSyncTicker
+} from '@/services/syncTicker'
+import {
+  start as startOfflineDetector,
+  stop as stopOfflineDetector
+} from '@/services/offlineDetector'
 import { APP_LOGO_COMPACT_URL } from '@/constants/branding'
 
 const appStore = useAppStore()
@@ -79,6 +92,16 @@ watch(
     closeMobileMenu()
   }
 )
+
+onMounted(() => {
+  startOfflineDetector()
+  void startSyncTicker()
+})
+
+onBeforeUnmount(() => {
+  stopSyncTicker()
+  stopOfflineDetector()
+})
 </script>
 
 <template>
@@ -127,6 +150,7 @@ watch(
           </button>
         </div>
         <div class="app-actions">
+          <PendingChangesBadge class="header-pending-badge" />
           <button class="btn-icon-action" @click="lockApp" :disabled="!appStore.settings.pinEnabled" title="Блокировка">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <rect x="3" y="11" width="18" height="11" rx="2"/>
@@ -249,8 +273,13 @@ watch(
     </nav>
 
     <main>
+      <OfflineBanner />
       <RouterView />
     </main>
+
+    <ConflictDialog />
+    <RecoveryDialog />
+    <PendingChangesDetail />
   </div>
 </template>
 

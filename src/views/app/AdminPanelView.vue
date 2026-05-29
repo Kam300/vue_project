@@ -746,6 +746,27 @@ onUnmounted(() => {
   padding-bottom: 12px;
 }
 
+@media (max-width: 600px) {
+  .admin-card {
+    padding: 14px;
+    border-radius: 14px;
+  }
+  .tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 14px;
+    margin-bottom: 12px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+  .tab-btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 10px 14px;
+    font-size: 0.92rem;
+  }
+}
+
 .tab-btn {
   display: inline-flex;
   align-items: center;

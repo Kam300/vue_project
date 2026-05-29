@@ -147,7 +147,13 @@ export interface BackupMetaResponse {
   assetsCount?: number
   checksumSha256?: string
   updatedAtUtc?: string
+  /** SHA-256 of `(updated_at || "|" || checksum)` (design §3.2). */
+  serverVersionTag?: string
+  /** Previous tag returned on `200 OK` upload responses (design §3.3). */
+  previousServerVersionTag?: string
   error?: string
+  /** `session_revoked`, `precondition_required`, etc. (design §3.3). */
+  reason?: string
 }
 
 export interface AuthProviderConfig {
@@ -170,7 +176,21 @@ export interface AuthUserResponse {
   email?: string | null
   preferredAuthProvider?: string | null
   isAdmin?: boolean
+  /**
+   * Single-session mode flag (Req 9.1, design §3.5). `true` means the server
+   * will revoke other active sessions on login; `false` means multi-device
+   * mode is enabled. The settings toggle in `SettingsView` is bound to the
+   * inverse of this value.
+   */
+  singleSessionEnabled?: boolean
   providers: AuthIdentityResponse[]
+}
+
+export interface AuthSettingsPatchResponse {
+  success: boolean
+  singleSessionEnabled: boolean
+  revokedSessions: number
+  error?: string
 }
 
 export interface AuthBootstrapResponse {

@@ -185,6 +185,26 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  /**
+   * Clear local auth state so callers can route the user to the login screen.
+   * Used by the 401 `session_revoked` middleware (design §4.7, Req 7.1, 7.2).
+   */
+  function clearLocalAuth(): void {
+    authUser.value = null
+    authProviders.value = null
+  }
+
+  /**
+   * Update the cached `singleSessionEnabled` flag on the active auth user
+   * without re-fetching the bootstrap snapshot. Used by the settings toggle
+   * (design §4.8, Req 9.3) to commit a successful PATCH /v2/auth/settings.
+   */
+  function setSingleSessionEnabled(value: boolean): void {
+    if (authUser.value) {
+      authUser.value = { ...authUser.value, singleSessionEnabled: value }
+    }
+  }
+
   return {
     settings,
     initialized,
@@ -202,6 +222,8 @@ export const useAppStore = defineStore('app', () => {
     setPin,
     setPinToggle,
     verifyPin,
-    lockSession
+    lockSession,
+    clearLocalAuth,
+    setSingleSessionEnabled
   }
 })

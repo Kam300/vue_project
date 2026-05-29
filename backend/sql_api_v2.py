@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -9,10 +10,11 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from flask import Response, redirect, request, send_file, session
+from flask import Response, g, redirect, request, send_file, session
 
 from sql_repository import (
     attach_yandex_identity,
+    db_connect,
     delete_backup,
     delete_backup_admin,
     delete_face_encoding_admin,
@@ -23,15 +25,73 @@ from sql_repository import (
     get_backup_meta,
     get_user_id_for_request,
     is_user_admin,
+    issue_session,
     list_all_backups_admin,
     list_audit_logs_admin,
     list_face_encodings_admin,
     list_users_admin,
     load_backup_path,
+    parse_capabilities,
     resolve_user_snapshot,
+    run_migrations,
     set_user_admin,
     store_backup,
+    utcnow_sql,
 )
+
+
+# Paths under /v2/* and /api/v2/* that do NOT require a bearer session token.
+_OPEN_AUTH_PATHS: frozenset[str] = frozenset({
+    '/v2/auth/providers', '/api/v2/auth/providers',
+    '/v2/auth/bootstrap', '/api/v2/auth/bootstrap',
+    '/v2/auth/me', '/api/v2/auth/me',
+    '/v2/auth/logout', '/api/v2/auth/logout',
+    '/v2/auth/yandex/start', '/api/v2/auth/yandex/start',
+    '/v2/auth/yandex/mobile/start', '/api/v2/auth/yandex/mobile/start',
+    '/v2/auth/yandex/callback', '/api/v2/auth/yandex/callback',
+    '/v2/auth/yandex/mobile/callback', '/api/v2/auth/yandex/mobile/callback',
+    '/v2/presence/ping', '/api/v2/presence/ping',
+})
+
+
+def _lookup_session_by_hash(db_path: Path, token_hash: str):
+    """Return the auth_sessions row for ``token_hash`` or ``None``.
+
+    Inline thin SQL helper used by the bearer-token middleware
+    (design.md §3.4). Caller should treat the result as read-only.
+    """
+    connection = db_connect(db_path)
+    try:
+        return connection.execute(
+            'SELECT id, user_id, device_id, token_hash, '
+            'created_at, expires_at, revoked_at, revoked_reason '
+            'FROM auth_sessions WHERE token_hash = ? LIMIT 1',
+            (token_hash,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+
+def _parse_change_ids(req) -> list[str] | None:
+    """Parse last-change-id list from the multipart form field ``change_ids``
+    (JSON-encoded array of strings) or from the ``X-Change-Ids`` header
+    (comma-separated). Returns ``None`` when neither source is present."""
+    raw_form = req.form.get('change_ids') if req.form else None
+    if raw_form:
+        try:
+            parsed = json.loads(raw_form)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if str(item).strip()]
+
+    raw_header = req.headers.get('X-Change-Ids')
+    if raw_header:
+        items = [piece.strip() for piece in raw_header.split(',') if piece.strip()]
+        if items:
+            return items
+
+    return None
 
 
 def _json_response(data: dict[str, Any], status: int = 200) -> Response:
@@ -201,14 +261,98 @@ def _render_popup(provider: str, status: str, message: str) -> str:
 </html>"""
 
 
-def _redirect_to_mobile(app_redirect_uri: str, provider: str, status: str, message: str) -> Response:
-    query = urllib.parse.urlencode(
+def _render_popup_with_token(provider: str, status: str, message: str, session_token: str) -> str:
+    payload = json.dumps(
         {
+            'source': 'familyone-auth',
             'provider': provider,
             'status': status,
             'message': message,
-        }
+            'sessionToken': session_token,
+        },
+        ensure_ascii=False,
     )
+    safe_message = json.dumps(message, ensure_ascii=False)
+    title = 'Подключение завершено' if status == 'success' else 'Не удалось завершить вход'
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{title}</title>
+  <style>
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #0b0e17;
+      color: #f4f7ff;
+      font: 16px/1.5 Segoe UI, Arial, sans-serif;
+    }}
+    .card {{
+      width: min(92vw, 420px);
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(17, 22, 34, 0.94);
+      border-radius: 24px;
+      padding: 24px;
+      box-shadow: 0 24px 60px rgba(0,0,0,0.28);
+    }}
+    h1 {{ margin: 0 0 12px; font-size: 28px; }}
+    p {{ margin: 0 0 18px; color: #ced7f5; }}
+    button {{
+      border: none;
+      border-radius: 14px;
+      padding: 12px 18px;
+      font: inherit;
+      font-weight: 600;
+      color: white;
+      background: linear-gradient(135deg, #7c5cfc, #f472b6);
+      cursor: pointer;
+    }}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>{title}</h1>
+    <p id="message"></p>
+    <button type="button" onclick="window.close()">Закрыть окно</button>
+  </main>
+  <script>
+    const payload = {payload};
+    const message = {safe_message};
+    document.getElementById('message').textContent = message;
+    try {{
+      if (window.opener && !window.opener.closed) {{
+        window.opener.postMessage(payload, '*');
+      }}
+    }} catch (error) {{
+      console.error(error);
+    }}
+    setTimeout(() => {{
+      try {{ window.close(); }} catch (error) {{ console.error(error); }}
+    }}, 700);
+  </script>
+</body>
+</html>"""
+
+
+def _redirect_to_mobile(
+    app_redirect_uri: str,
+    provider: str,
+    status: str,
+    message: str,
+    *,
+    session_token: str | None = None,
+) -> Response:
+    params: dict[str, str] = {
+        'provider': provider,
+        'status': status,
+        'message': message,
+    }
+    if session_token:
+        params['session_token'] = session_token
+    query = urllib.parse.urlencode(params)
     separator = '&' if '?' in app_redirect_uri else '?'
     return redirect(f'{app_redirect_uri}{separator}{query}')
 
@@ -301,6 +445,9 @@ def register_sql_api_v2(
     reference_photos_dir: str | None = None,
 ) -> None:
     db_path = base_dir / 'familyone.db'
+    # Run idempotent schema migrations before any handler is bound so that
+    # `/v2/*` endpoints always see the target schema (multi-device sync safety).
+    run_migrations(db_path)
     app.secret_key = str(os.environ.get('SESSION_SECRET_KEY') or secrets.token_hex(32))
     app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
     app.config['SESSION_COOKIE_HTTPONLY'] = True
@@ -312,6 +459,50 @@ def register_sql_api_v2(
 
     if logger:
         logger.info('SQL v2 API enabled, database=%s', db_path)
+
+    # ============================================================
+    # BEARER-TOKEN VALIDATION MIDDLEWARE (design §3.4)
+    # ============================================================
+    @app.before_request
+    def _enforce_session():
+        path = request.path or ''
+        if not (path.startswith('/v2/') or path.startswith('/api/v2/')):
+            return None
+        if path in _OPEN_AUTH_PATHS:
+            return None
+
+        auth_header = request.headers.get('Authorization', '') or ''
+        if not auth_header.startswith('Bearer '):
+            # No bearer present — leave it to legacy device-id / cookie auth
+            # so existing clients keep working (Req 8 backwards compat).
+            return None
+
+        raw_token = auth_header[len('Bearer '):].strip()
+        if not raw_token:
+            return None
+
+        token_hash = hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
+        try:
+            row = _lookup_session_by_hash(db_path, token_hash)
+        except Exception:
+            if logger:
+                logger.exception('auth_sessions lookup failed')
+            return _json_response({'error': 'session_unknown'}, 401)
+
+        if row is None:
+            return _json_response({'error': 'session_unknown'}, 401)
+        if row['revoked_at'] is not None:
+            return _json_response(
+                {'error': 'session_revoked', 'reason': row['revoked_reason']},
+                401,
+            )
+        if row['expires_at'] < utcnow_sql():
+            return _json_response({'error': 'session_expired'}, 401)
+
+        g.user_id = int(row['user_id'])
+        g.session_id = int(row['id'])
+        g.session_token_hash = token_hash
+        return None
 
     # ============================================================
     # PRESENCE TRACKER (in-memory)
@@ -350,6 +541,8 @@ def register_sql_api_v2(
             'window_seconds': PRESENCE_WINDOW_SEC,
         }
 
+    @app.get('/api/v2/presence/ping')
+    @app.get('/v2/presence/ping')
     @app.post('/api/v2/presence/ping')
     @app.post('/v2/presence/ping')
     def presence_ping():
@@ -394,6 +587,72 @@ def register_sql_api_v2(
     def auth_logout():
         session.clear()
         return _json_response({'success': True})
+
+    @app.patch('/api/v2/auth/settings')
+    @app.patch('/v2/auth/settings')
+    def auth_settings_patch():
+        # Auth: gated by the bearer middleware. g.user_id and g.session_id
+        # must be set by the middleware before this route runs.
+        user_id = getattr(g, 'user_id', None)
+        session_id = getattr(g, 'session_id', None)
+        if not user_id or not session_id:
+            return _json_response({'success': False, 'error': 'unauthorized'}, 401)
+
+        payload = request.get_json(silent=True) or {}
+        if (
+            'singleSessionEnabled' not in payload
+            or not isinstance(payload['singleSessionEnabled'], bool)
+        ):
+            return _json_response({'success': False, 'error': 'invalid_payload'}, 400)
+
+        new_value = bool(payload['singleSessionEnabled'])
+        revoked = 0
+        conn = db_connect(db_path)
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute(
+                'UPDATE users SET single_session_enabled = ? WHERE id = ?',
+                (1 if new_value else 0, user_id),
+            )
+            if new_value:
+                now = utcnow_sql()
+                other_active = conn.execute(
+                    'SELECT id, device_id FROM auth_sessions '
+                    'WHERE user_id = ? AND id != ? AND revoked_at IS NULL '
+                    'AND expires_at > ?',
+                    (user_id, session_id, now),
+                ).fetchall()
+                conn.execute(
+                    "UPDATE auth_sessions SET revoked_at = ?, "
+                    "revoked_reason = 'single_session_re_enabled' "
+                    "WHERE user_id = ? AND id != ? AND revoked_at IS NULL "
+                    "AND expires_at > ?",
+                    (now, user_id, session_id, now),
+                )
+                revoked = len(other_active)
+                if other_active:
+                    from sql_repository import _audit_log, _get_default_tree_id
+                    tree_id = _get_default_tree_id(conn, user_id)
+                    for r in other_active:
+                        _audit_log(
+                            conn,
+                            tree_id,
+                            user_id,
+                            'session_revoked',
+                            {
+                                'device_id': r['device_id'],
+                                'revoked_reason': 'single_session_re_enabled',
+                            },
+                        )
+            conn.commit()
+        finally:
+            conn.close()
+
+        return _json_response({
+            'success': True,
+            'singleSessionEnabled': new_value,
+            'revokedSessions': revoked,
+        })
 
     @app.get('/api/v2/auth/yandex/start')
     @app.get('/v2/auth/yandex/start')
@@ -477,10 +736,29 @@ def register_sql_api_v2(
         try:
             profile = _exchange_yandex_code(code, _yandex_redirect_uri(mobile=False))
             snapshot = attach_yandex_identity(db_path, str(state.get('deviceId') or ''), profile)
-            session['familyone_user_id'] = int(snapshot['user']['id'])
-            session['familyone_device_id'] = str(state.get('deviceId') or '')
+            user_id = int(snapshot['user']['id'])
+            device_id = str(state.get('deviceId') or '')
+            try:
+                conn = db_connect(db_path)
+                try:
+                    raw_token = issue_session(conn, user_id, device_id)
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception:
+                if logger:
+                    logger.exception('issue_session failed (web callback)')
+                return _html_response(
+                    _render_popup('yandex', 'error', 'Не удалось создать сессию'),
+                    500,
+                )
+
+            session['familyone_user_id'] = user_id
+            session['familyone_device_id'] = device_id
             session.modified = True
-            return _html_response(_render_popup('yandex', 'success', 'Яндекс ID подключен'))
+            return _html_response(
+                _render_popup_with_token('yandex', 'success', 'Яндекс ID подключен', raw_token)
+            )
         except Exception as error_obj:
             if logger:
                 logger.exception('Yandex web callback failed')
@@ -514,16 +792,43 @@ def register_sql_api_v2(
         try:
             profile = _exchange_yandex_code(code, _yandex_redirect_uri(mobile=True))
             snapshot = attach_yandex_identity(db_path, str(state.get('deviceId') or ''), profile)
-            session['familyone_user_id'] = int(snapshot['user']['id'])
-            session['familyone_device_id'] = str(state.get('deviceId') or '')
+            user_id = int(snapshot['user']['id'])
+            device_id = str(state.get('deviceId') or '')
+            try:
+                conn = db_connect(db_path)
+                try:
+                    raw_token = issue_session(conn, user_id, device_id)
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception:
+                if logger:
+                    logger.exception('issue_session failed (mobile callback)')
+                return _redirect_to_mobile(
+                    app_redirect_uri, 'yandex', 'error', 'Не удалось создать сессию'
+                )
+
+            session['familyone_user_id'] = user_id
+            session['familyone_device_id'] = device_id
             session.modified = True
-            return _redirect_to_mobile(app_redirect_uri, 'yandex', 'success', 'Яндекс ID подключен')
+            return _redirect_to_mobile(
+                app_redirect_uri,
+                'yandex',
+                'success',
+                'Яндекс ID подключен',
+                session_token=raw_token,
+            )
         except Exception as error_obj:
             if logger:
                 logger.exception('Yandex mobile callback failed')
             return _redirect_to_mobile(app_redirect_uri, 'yandex', 'error', str(error_obj))
 
     def _resolve_backup_user_id() -> int | None:
+        # Prefer bearer-validated user_id when middleware authenticated the
+        # request (design §3.4); fall back to legacy device-id / cookie path.
+        bearer_uid = getattr(g, 'user_id', None)
+        if bearer_uid:
+            return int(bearer_uid)
         device_id = _request_device_id()
         return get_user_id_for_request(
             db_path,
@@ -554,8 +859,23 @@ def register_sql_api_v2(
 
         try:
             archive_bytes = backup_file.read()
-            meta = store_backup(db_path, base_dir, user_id, archive_bytes)
-            return _json_response(meta)
+            if_match = request.headers.get('If-Match')
+            force = request.args.get('force') == 'true'
+            capabilities = parse_capabilities(request)
+            require_if_match = bool(int(os.environ.get('BACKUP_REQUIRE_IF_MATCH', '1')))
+            last_change_ids = _parse_change_ids(request)
+            body, status = store_backup(
+                db_path,
+                base_dir,
+                user_id,
+                archive_bytes,
+                if_match=if_match,
+                force=force,
+                capabilities=capabilities,
+                require_if_match=require_if_match,
+                last_change_ids=last_change_ids,
+            )
+            return _json_response(body, status)
         except Exception as error_obj:
             if logger:
                 logger.exception('backup upload failed')
@@ -794,18 +1114,32 @@ def register_sql_api_v2(
         if error_response is not None:
             return error_response
         try:
-            if face_encodings_db is not None:
-                member_ids = list(face_encodings_db.keys())
+            # Mirror admin_faces_list: read live in-memory dict from telegram_service.
+            import sys
+            ts = sys.modules.get('telegram_service') or sys.modules.get('__main__')
+            face_db = getattr(ts, 'face_encodings_db', None) if ts else None
+            ref_dir = getattr(ts, 'REFERENCE_PHOTOS_DIR', None) if ts else None
+            save_fn = getattr(ts, 'save_encodings', None) if ts else None
+            if face_db is None:
+                face_db = face_encodings_db
+                ref_dir = ref_dir or reference_photos_dir
+                save_fn = save_fn or save_encodings_fn
+            if face_db is not None and isinstance(face_db, dict):
+                member_ids = list(face_db.keys())
                 idx = face_id - 1
                 if 0 <= idx < len(member_ids):
                     member_id = member_ids[idx]
-                    del face_encodings_db[member_id]
-                    if reference_photos_dir:
-                        photo_path = os.path.join(reference_photos_dir, f"{member_id}.jpg")
+                    del face_db[member_id]
+                    if ref_dir:
+                        photo_path = os.path.join(ref_dir, f"{member_id}.jpg")
                         if os.path.exists(photo_path):
                             os.remove(photo_path)
-                    if save_encodings_fn:
-                        save_encodings_fn()
+                    if callable(save_fn):
+                        try:
+                            save_fn()
+                        except Exception:
+                            if logger:
+                                logger.exception('save_encodings after delete failed')
                     return _json_response({'success': True, 'message': f'Face {member_id} deleted'})
                 return _json_response({'success': False, 'error': 'Face not found'}, 404)
             result = delete_face_encoding_admin(db_path, face_id)

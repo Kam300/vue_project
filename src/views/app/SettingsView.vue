@@ -5,7 +5,7 @@ import PageHeader from '@/components/shared/PageHeader.vue'
 import AppIcon from '@/components/shared/AppIcon.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useMemberStore } from '@/stores/memberStore'
-import { clearAllFaces } from '@/services/api'
+import { authSettingsPatch, clearAllFaces } from '@/services/api'
 
 const appStore = useAppStore()
 const memberStore = useMemberStore()
@@ -27,6 +27,55 @@ const clearingAll = ref(false)
 const status = ref('')
 const error = ref('')
 
+// --- Single-session toggle (design §4.8, Req 9.1, 9.3, 9.4) -----------------
+// UI position is the inverse of `singleSessionEnabled`:
+//   toggle ON  ⇔ multi-device mode  ⇔ singleSessionEnabled = false
+//   toggle OFF ⇔ single-session     ⇔ singleSessionEnabled = true
+const multiDeviceAllowed = ref(false)
+const sessionToggleBusy = ref(false)
+const sessionToggleError = ref('')
+
+function syncSessionToggleFromStore(): void {
+  // Default to single-session (toggle OFF) when the user is not loaded yet.
+  const flag = appStore.authUser?.singleSessionEnabled ?? true
+  multiDeviceAllowed.value = !flag
+}
+
+watch(
+  () => appStore.authUser?.singleSessionEnabled,
+  () => {
+    if (!sessionToggleBusy.value) {
+      syncSessionToggleFromStore()
+    }
+  }
+)
+
+async function onSingleSessionToggle(event: Event): Promise<void> {
+  const target = event.target as HTMLInputElement
+  const next = target.checked                       // optimistic UI value
+  multiDeviceAllowed.value = next
+
+  const previousFlag = appStore.authUser?.singleSessionEnabled ?? true
+  const newFlag = !next
+  sessionToggleBusy.value = true
+  sessionToggleError.value = ''
+
+  try {
+    const response = await authSettingsPatch({ singleSessionEnabled: newFlag })
+    if (!response || response.success !== true) {
+      throw new Error(response?.error || 'Не удалось обновить настройку сессии')
+    }
+    appStore.setSingleSessionEnabled(response.singleSessionEnabled)
+    multiDeviceAllowed.value = !response.singleSessionEnabled
+  } catch (reason) {
+    multiDeviceAllowed.value = !previousFlag
+    sessionToggleError.value =
+      (reason as Error).message || 'Не удалось обновить настройку сессии'
+  } finally {
+    sessionToggleBusy.value = false
+  }
+}
+
 function syncFromStore(): void {
   form.apiBaseUrl = appStore.settings.apiBaseUrl
   form.theme = appStore.settings.theme
@@ -39,6 +88,7 @@ function syncFromStore(): void {
 
 onMounted(() => {
   syncFromStore()
+  syncSessionToggleFromStore()
 })
 
 // Auto-save безопасных полей: тема и шаблон дерева
@@ -234,6 +284,33 @@ async function clearAllData(): Promise<void> {
               Заблокировать сейчас
             </button>
           </div>
+        </div>
+
+        <div class="section-divider"></div>
+
+        <!-- Multi-device sessions (design §4.8, Req 9.1, 9.3, 9.4) -->
+        <div class="settings-group">
+          <h2 class="group-title">
+            <span class="group-icon"><AppIcon name="devices" :size="20" /></span>
+            Многопользовательские сессии
+          </h2>
+          <label class="toggle-switch">
+            <input
+              type="checkbox"
+              :checked="multiDeviceAllowed"
+              :disabled="sessionToggleBusy || !appStore.authUser"
+              @change="onSingleSessionToggle"
+            />
+            <span class="toggle-track"></span>
+            <span>Разрешить одновременные сессии на нескольких устройствах</span>
+          </label>
+          <p class="danger-note" style="margin: 4px 0 0">
+            Когда выключено, вход на новом устройстве завершит сессии на остальных.
+          </p>
+          <p v-if="sessionToggleError" class="error-msg with-icon" style="margin-top: 8px">
+            <AppIcon name="warning" :size="18" />
+            {{ sessionToggleError }}
+          </p>
         </div>
 
         <div class="section-divider"></div>

@@ -25,7 +25,26 @@ const memberId = computed(() => Number(route.params.id || 0) || 0)
 const isCreateMode = computed(() => route.path.endsWith('/new'))
 
 const currentMember = computed(() => {
-  if (isCreateMode.value) return null
+  if (isCreateMode.value) {
+    const presetRole = String(route.query.role || '').toUpperCase()
+    if (!presetRole) return null
+    const isFemaleRole = ['GRANDMOTHER', 'MOTHER', 'AUNT', 'SISTER', 'DAUGHTER', 'NIECE', 'GRANDDAUGHTER'].includes(presetRole)
+    return {
+      firstName: '',
+      lastName: '',
+      patronymic: '',
+      gender: isFemaleRole ? 'FEMALE' : 'MALE',
+      birthDate: '',
+      phoneNumber: '',
+      role: presetRole,
+      socialRoles: '',
+      photoUri: '',
+      maidenName: '',
+      fatherId: null,
+      motherId: null,
+      weddingDate: ''
+    } as FamilyMember
+  }
   return memberStore.members.find((member) => member.id === memberId.value) || null
 })
 

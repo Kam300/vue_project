@@ -868,15 +868,26 @@ Write-Ok 'Backend dependencies ready'
 
 Write-Section 'Step 5/7 - Building frontend'
 
-Write-Step 'npm install...'
-npm install --silent 2>$null
-if ($LASTEXITCODE -ne 0) { throw 'npm install failed.' }
-Write-Ok 'npm packages installed'
+# `$ErrorActionPreference = 'Stop'` (set above) makes ANY stderr output from a
+# native command raise a NativeCommandError, even when the process exits 0.
+# Vite's reporter plugin writes a non-fatal note to stderr after a successful
+# build ("built in 4.12s" + PWA), so we temporarily switch to 'Continue' and
+# rely solely on $LASTEXITCODE.
+$savedErrorAction = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    Write-Step 'npm install...'
+    npm install --silent 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'npm install failed.' }
+    Write-Ok 'npm packages installed'
 
-Write-Step 'npm run build...'
-npm run build 2>$null
-if ($LASTEXITCODE -ne 0) { throw 'npm run build failed.' }
-Write-Ok 'Frontend built -> dist/'
+    Write-Step 'npm run build...'
+    npm run build 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'npm run build failed.' }
+    Write-Ok 'Frontend built -> dist/'
+} finally {
+    $ErrorActionPreference = $savedErrorAction
+}
 
 # ========================================
 # STEP 6: START SERVICES

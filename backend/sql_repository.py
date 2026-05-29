@@ -4,9 +4,10 @@ import hashlib
 import io
 import json
 import os
+import secrets
 import sqlite3
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,138 @@ def db_connect(db_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(str(db_path))
     connection.row_factory = sqlite3.Row
     return connection
+
+
+def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _column_exists(connection: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    if not _table_exists(connection, table_name):
+        return False
+    cursor = connection.execute(f"PRAGMA table_info({table_name})")
+    for row in cursor.fetchall():
+        # row[1] is the column name regardless of row_factory because PRAGMA returns tuples
+        try:
+            name = row['name']  # type: ignore[index]
+        except Exception:
+            name = row[1]
+        if name == column_name:
+            return True
+    return False
+
+
+def _migration_001_backup_snapshots_last_change_ids(connection: sqlite3.Connection) -> None:
+    """Add last_change_ids_json TEXT to backup_snapshots (idempotent)."""
+    if not _table_exists(connection, 'backup_snapshots'):
+        return
+    if _column_exists(connection, 'backup_snapshots', 'last_change_ids_json'):
+        return
+    connection.execute(
+        'ALTER TABLE backup_snapshots ADD COLUMN last_change_ids_json TEXT'
+    )
+
+
+def _migration_002_users_single_session_enabled(connection: sqlite3.Connection) -> None:
+    """Add single_session_enabled INTEGER NOT NULL DEFAULT 1 to users (idempotent)."""
+    if not _table_exists(connection, 'users'):
+        return
+    if _column_exists(connection, 'users', 'single_session_enabled'):
+        return
+    connection.execute(
+        'ALTER TABLE users ADD COLUMN single_session_enabled INTEGER NOT NULL DEFAULT 1'
+    )
+
+
+def _migration_003_auth_sessions_create(connection: sqlite3.Connection) -> None:
+    """Create auth_sessions table and supporting indexes (idempotent)."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            device_id       TEXT    NOT NULL,
+            token_hash      TEXT    NOT NULL,
+            created_at      TEXT    NOT NULL,
+            expires_at      TEXT    NOT NULL,
+            revoked_at      TEXT,
+            revoked_reason  TEXT,
+            UNIQUE (token_hash)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_active
+            ON auth_sessions(user_id) WHERE revoked_at IS NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_device
+            ON auth_sessions(user_id, device_id)
+        """
+    )
+
+
+def run_migrations(db_path: Path) -> None:
+    """Run additive, idempotent schema migrations for multi-device sync safety.
+
+    Migrations are applied in order:
+      001_backup_snapshots_last_change_ids
+      002_users_single_session_enabled
+      003_auth_sessions_create
+
+    Safe to invoke repeatedly: every step uses IF NOT EXISTS or PRAGMA-based
+    guards so a fresh DB and an existing DB converge to the same target schema.
+    """
+    connection = db_connect(Path(db_path))
+    try:
+        connection.execute('BEGIN')
+        _migration_001_backup_snapshots_last_change_ids(connection)
+        _migration_002_users_single_session_enabled(connection)
+        _migration_003_auth_sessions_create(connection)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def compute_server_version_tag(updated_at_sql: str, checksum_sha256: str) -> str:
+    """Compute the opaque ``Server_Version_Tag`` for a backup snapshot.
+
+    Pure deterministic function: same inputs always produce the same output.
+
+    The tag is ``sha256(updated_at_sql || "|" || checksum_sha256)`` encoded as
+    a 64-character lowercase hex string. ``updated_at_sql`` is the value stored
+    in ``backup_snapshots.updated_at`` (e.g. ``'YYYY-MM-DD HH:MM:SS.ffffff'``)
+    and ``checksum_sha256`` is the 64-lowercase-hex SHA-256 of the archive.
+    """
+    payload = f"{updated_at_sql}|{checksum_sha256}".encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()
+
+
+def parse_capabilities(req: Any) -> set[str]:
+    """Parse the ``X-Client-Capabilities`` header into a lowercase token set.
+
+    Tokens are comma-separated, whitespace-trimmed, and case-folded. An absent
+    or empty header yields an empty set. ``req`` is any object exposing a
+    ``headers`` mapping with a ``get`` method (e.g. a Flask ``Request``).
+    """
+    raw = ''
+    headers = getattr(req, 'headers', None)
+    if headers is not None:
+        try:
+            raw = headers.get('X-Client-Capabilities', '') or ''
+        except Exception:
+            raw = ''
+    return {tok.strip().lower() for tok in raw.split(',') if tok.strip()}
 
 
 def _provider_key(provider: str, provider_user_id: str) -> tuple[str, str]:
@@ -545,11 +678,24 @@ def _get_backup_row(connection: sqlite3.Connection, tree_id: int) -> sqlite3.Row
 
 
 def _make_backup_meta(row: sqlite3.Row | None, exists: bool) -> dict[str, Any]:
+    """Build the backup-meta payload for a snapshot row.
+
+    The payload always carries a ``serverVersionTag`` key so clients can rely on
+    its presence regardless of whether a snapshot exists:
+
+    * ``exists=True``  -> ``serverVersionTag = compute_server_version_tag(
+      row['updated_at'], row['checksum_sha256'])`` (deterministic, stable
+      across reads with no intervening upload — Requirement 4.3).
+    * ``exists=False`` -> ``serverVersionTag = None`` (explicitly null rather
+      than omitted to keep the response shape uniform; clients treat ``null``
+      the same as "no snapshot ever observed").
+    """
     if row is None or not exists:
         return {
             'success': True,
             'exists': False,
             'schemaVersion': 1,
+            'serverVersionTag': None,
         }
 
     return {
@@ -564,6 +710,9 @@ def _make_backup_meta(row: sqlite3.Row | None, exists: bool) -> dict[str, Any]:
         'memberPhotosCount': int(row['member_photos_count']) if row['member_photos_count'] is not None else None,
         'assetsCount': int(row['assets_count']) if row['assets_count'] is not None else None,
         'checksumSha256': row['checksum_sha256'],
+        'serverVersionTag': compute_server_version_tag(
+            row['updated_at'], row['checksum_sha256']
+        ),
     }
 
 
@@ -619,12 +768,165 @@ def _audit_log(connection: sqlite3.Connection, tree_id: int, user_id: int, actio
     )
 
 
-def store_backup(db_path: Path, base_dir: Path, user_id: int, archive_bytes: bytes) -> dict[str, Any]:
+def issue_session(
+    connection: sqlite3.Connection,
+    user_id: int,
+    device_id: str,
+    *,
+    ttl_days: int = 30,
+) -> str:
+    """Issue a new auth session token, enforcing single-session if enabled.
+
+    Returns the raw token (only sha256(token) is persisted). Caller is
+    responsible for transaction management — this helper does NOT commit.
+
+    Behaviour (design.md §3.4):
+      * Lookup the user's ``single_session_enabled`` flag.
+      * If enabled, atomically revoke every currently-active session for the
+        user (including any prior session for the same ``device_id``) with
+        ``revoked_reason='signed_in_on_other_device'`` and append one
+        ``audit_logs(action='session_revoked')`` row per revoked session.
+      * Insert the new ``auth_sessions`` row and return the raw token.
+
+    Raises ``ValueError`` if ``user_id`` does not exist.
+
+    Satisfies Requirements 5.2, 5.7, 6.1, 6.2, 6.3, 14.4.
+    """
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    now = utcnow_sql()
+    expires = (
+        (datetime.now(timezone.utc) + timedelta(days=ttl_days))
+        .replace(tzinfo=None)
+        .isoformat(sep=' ')
+    )
+
+    user_row = connection.execute(
+        'SELECT single_session_enabled FROM users WHERE id = ?',
+        (user_id,),
+    ).fetchone()
+    if user_row is None:
+        raise ValueError(f'unknown user_id={user_id}')
+    single_session = bool(user_row['single_session_enabled'])
+
+    if single_session:
+        revoked_rows = connection.execute(
+            'SELECT id, device_id FROM auth_sessions '
+            'WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ?',
+            (user_id, now),
+        ).fetchall()
+        if revoked_rows:
+            connection.execute(
+                "UPDATE auth_sessions "
+                "SET revoked_at = ?, revoked_reason = 'signed_in_on_other_device' "
+                "WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ?",
+                (now, user_id, now),
+            )
+            tree_id = _get_default_tree_id(connection, user_id)
+            for r in revoked_rows:
+                _audit_log(
+                    connection,
+                    tree_id,
+                    user_id,
+                    'session_revoked',
+                    {
+                        'device_id': r['device_id'],
+                        'revoked_reason': 'signed_in_on_other_device',
+                    },
+                )
+
+    connection.execute(
+        'INSERT INTO auth_sessions '
+        '(user_id, device_id, token_hash, created_at, expires_at) '
+        'VALUES (?, ?, ?, ?, ?)',
+        (user_id, device_id, token_hash, now, expires),
+    )
+    return raw_token
+
+
+def store_backup(
+    db_path: Path,
+    base_dir: Path,
+    user_id: int,
+    archive_bytes: bytes,
+    *,
+    if_match: str | None = None,
+    force: bool = True,
+    capabilities: set[str] | None = None,
+    require_if_match: bool = False,
+    last_change_ids: list[str] | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Persist a backup archive with optimistic-concurrency semantics.
+
+    Implements the decision table from design.md §3.3 (Requirements 1.3–1.10,
+    14.1–14.3, 15.1–15.3). Returns ``(body_dict, status_int)``.
+
+    The keyword-only defaults are intentionally permissive (``force=True``,
+    ``require_if_match=False``) so legacy positional callers retain the
+    previous last-writer-wins behaviour until task 2.2 wires the Flask
+    wrapper. Every successful response includes ``serverVersionTag`` and
+    ``previousServerVersionTag`` (``None`` for the first snapshot).
+    """
     meta = parse_backup_manifest(archive_bytes)
+    caps = capabilities or set()
+    last_change_ids_json = (
+        json.dumps(list(last_change_ids)) if last_change_ids is not None else None
+    )
+
     connection = db_connect(db_path)
     try:
+        # Tree-id resolution may commit when bootstrapping a new user; resolve
+        # it before BEGIN IMMEDIATE so the explicit transaction below is the
+        # only writer holding the RESERVED lock.
         tree_id = _get_default_tree_id(connection, user_id)
+        connection.execute('BEGIN IMMEDIATE')  # Req 1.9 — row-level write lock
+
         row = _get_backup_row(connection, tree_id)
+        current_tag = (
+            compute_server_version_tag(row['updated_at'], row['checksum_sha256'])
+            if row is not None
+            else None
+        )
+        legacy = 'if-match-v1' not in caps
+
+        # ---- precondition gates ---------------------------------------------
+        # Req 15.3: legacy clients can NEVER overwrite an existing snapshot,
+        # not even with force=true. This gate runs BEFORE the force short-
+        # circuit so legacy + force=true + exists still returns 426.
+        if require_if_match and legacy and row is not None:
+            payload = _make_backup_meta(row, True)
+            payload['error'] = 'client_upgrade_required'
+            connection.rollback()
+            return (payload, 426)
+
+        # 428 / 409 gates apply only to strict clients and are skipped on
+        # force=true (Req 1.8). Legacy first-snapshot also flows through here.
+        if not force and require_if_match and not legacy:
+            if row is not None:
+                if if_match is None:
+                    # Req 1.5
+                    payload = _make_backup_meta(row, True)
+                    payload['error'] = 'precondition_required'
+                    connection.rollback()
+                    return (payload, 428)
+                if if_match == '*' or if_match != current_tag:
+                    # Req 1.4 / 1.7 — and Req 14.1 audit row.
+                    _audit_log(
+                        connection,
+                        tree_id,
+                        user_id,
+                        'backup_conflict_rejected',
+                        {'if_match': if_match, 'current': current_tag},
+                    )
+                    payload = _make_backup_meta(row, True)
+                    payload['error'] = 'conflict'
+                    connection.commit()
+                    return (payload, 409)
+            # row is None: accept as first snapshot (Req 1.6 covers If-Match: *).
+
+        previous_tag = current_tag
+
+        # ---- determine storage path -----------------------------------------
         if row is not None:
             relative_path = row['storage_path']
         else:
@@ -633,79 +935,118 @@ def store_backup(db_path: Path, base_dir: Path, user_id: int, archive_bytes: byt
 
         absolute_path = resolve_storage_path(base_dir, relative_path)
         absolute_path.parent.mkdir(parents=True, exist_ok=True)
-        absolute_path.write_bytes(archive_bytes)
+        temp_path = absolute_path.with_suffix(absolute_path.suffix + '.tmp')
 
-        now = utcnow_sql()
-        size_bytes = len(archive_bytes)
-        if row is not None:
-            connection.execute(
-                """
-                UPDATE backup_snapshots
-                SET created_by_user_id = ?, storage_path = ?, checksum_sha256 = ?,
-                    size_bytes = ?, schema_version = ?, compression = ?, members_count = ?,
-                    member_photos_count = ?, assets_count = ?, source = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    user_id,
-                    relative_path,
-                    meta['checksumSha256'],
-                    size_bytes,
-                    meta['schemaVersion'],
-                    meta['compression'],
-                    meta['membersCount'],
-                    meta['memberPhotosCount'],
-                    meta['assetsCount'],
-                    'upload',
-                    now,
-                    row['id'],
-                ),
-            )
-            created_at = row['created_at']
-        else:
-            connection.execute(
-                """
-                INSERT INTO backup_snapshots (
-                    tree_id, created_by_user_id, storage_path, checksum_sha256, size_bytes,
-                    schema_version, compression, members_count, member_photos_count,
-                    assets_count, source, created_at, updated_at
+        try:
+            # Stage the archive bytes next to the destination so the on-disk
+            # publish can be made atomic (os.replace) only after SQL commit.
+            temp_path.write_bytes(archive_bytes)
+
+            now = utcnow_sql()
+            size_bytes = len(archive_bytes)
+            if row is not None:
+                connection.execute(
+                    """
+                    UPDATE backup_snapshots
+                    SET created_by_user_id = ?, storage_path = ?, checksum_sha256 = ?,
+                        size_bytes = ?, schema_version = ?, compression = ?, members_count = ?,
+                        member_photos_count = ?, assets_count = ?, source = ?, updated_at = ?,
+                        last_change_ids_json = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        user_id,
+                        relative_path,
+                        meta['checksumSha256'],
+                        size_bytes,
+                        meta['schemaVersion'],
+                        meta['compression'],
+                        meta['membersCount'],
+                        meta['memberPhotosCount'],
+                        meta['assetsCount'],
+                        'upload',
+                        now,
+                        last_change_ids_json,
+                        row['id'],
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    tree_id,
-                    user_id,
-                    relative_path,
-                    meta['checksumSha256'],
-                    size_bytes,
-                    meta['schemaVersion'],
-                    meta['compression'],
-                    meta['membersCount'],
-                    meta['memberPhotosCount'],
-                    meta['assetsCount'],
-                    'upload',
-                    now,
-                    now,
-                ),
-            )
-            created_at = now
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO backup_snapshots (
+                        tree_id, created_by_user_id, storage_path, checksum_sha256, size_bytes,
+                        schema_version, compression, members_count, member_photos_count,
+                        assets_count, source, created_at, updated_at, last_change_ids_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        tree_id,
+                        user_id,
+                        relative_path,
+                        meta['checksumSha256'],
+                        size_bytes,
+                        meta['schemaVersion'],
+                        meta['compression'],
+                        meta['membersCount'],
+                        meta['memberPhotosCount'],
+                        meta['assetsCount'],
+                        'upload',
+                        now,
+                        now,
+                        last_change_ids_json,
+                    ),
+                )
 
-        response_meta = {
-            'success': True,
-            'exists': True,
-            'schemaVersion': meta['schemaVersion'],
-            'createdAtUtc': meta['createdAtUtc'] or created_at.replace(' ', 'T') + 'Z',
-            'updatedAtUtc': meta['updatedAtUtc'] or now.replace(' ', 'T') + 'Z',
-            'compression': meta['compression'],
-            'sizeBytes': size_bytes,
-            'membersCount': meta['membersCount'],
-            'memberPhotosCount': meta['memberPhotosCount'],
-            'assetsCount': meta['assetsCount'],
-            'checksumSha256': meta['checksumSha256'],
-        }
-        _audit_log(connection, tree_id, user_id, 'backup_upload', response_meta)
-        connection.commit()
-        return response_meta
+            new_tag = compute_server_version_tag(now, meta['checksumSha256'])
+
+            if force:
+                try:
+                    _audit_log(
+                        connection,
+                        tree_id,
+                        user_id,
+                        'backup_force_overwrite',
+                        {'previous': previous_tag, 'new': new_tag},
+                    )
+                except Exception:
+                    # Req 14.3 — leave the snapshot unchanged.
+                    connection.rollback()
+                    try:
+                        if temp_path.exists():
+                            temp_path.unlink()
+                    except Exception:
+                        pass
+                    return (
+                        {
+                            'error': 'audit_unavailable',
+                            'serverVersionTag': previous_tag,
+                        },
+                        503,
+                    )
+
+            connection.commit()
+
+            # Atomic on-disk publish AFTER the SQL transaction is durable so a
+            # rolled-back transaction never leaves a half-written archive
+            # under the storage_path referenced by the snapshot row.
+            os.replace(str(temp_path), str(absolute_path))
+
+            new_row = _get_backup_row(connection, tree_id)
+            response = _make_backup_meta(new_row, True)
+            response['previousServerVersionTag'] = previous_tag
+            return (response, 200)
+        except Exception:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except Exception:
+                pass
+            raise
     finally:
         connection.close()
 

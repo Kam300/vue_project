@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, nextTick, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useMemberStore } from '@/stores/memberStore'
 import { useAppStore } from '@/stores/appStore'
 import PageHeader from '@/components/shared/PageHeader.vue'
@@ -9,6 +10,7 @@ import type { FamilyMember } from '@/types/models'
 
 const memberStore = useMemberStore()
 const appStore = useAppStore()
+const router = useRouter()
 
 onMounted(() => {
   if (!memberStore.members.length) {
@@ -22,12 +24,47 @@ const search = ref('')
 const activeId = ref<number | null>(null)
 const stageRef = ref<HTMLDivElement | null>(null)
 const cardRefs = new Map<number, HTMLElement>()
+// Ghost cards keyed by the *real* partner's id — used by recalcLines() to
+// anchor the parent connector at the pair midpoint even when one side is empty.
+const ghostPairRefs = new Map<number, HTMLElement>()
 const lines = ref<Array<{ id: string; d: string; kind: 'parent' | 'spouse'; highlight: boolean }>>([])
+
+// Стиль линий между поколениями: ortho — прямые с прямоугольной шиной,
+// curve — плавная S-кривая. Сохраняется в localStorage как пользовательское
+// предпочтение.
+type LineStyle = 'ortho' | 'curve'
+const LINE_STYLE_KEY = 'familyone.tree.lineStyle'
+const lineStyle = ref<LineStyle>(
+  (typeof localStorage !== 'undefined' ? localStorage.getItem(LINE_STYLE_KEY) : null) === 'curve'
+    ? 'curve'
+    : 'ortho'
+)
+function setLineStyle(next: LineStyle): void {
+  lineStyle.value = next
+  try { localStorage.setItem(LINE_STYLE_KEY, next) } catch { /* storage disabled */ }
+}
 
 function registerCard(id: number | undefined, el: HTMLElement | null) {
   if (!id) return
   if (el) cardRefs.set(id, el)
   else cardRefs.delete(id)
+}
+
+function registerGhostPair(realId: number | undefined, el: HTMLElement | null) {
+  if (!realId) return
+  if (el) ghostPairRefs.set(realId, el)
+  else ghostPairRefs.delete(realId)
+}
+
+function openCreate(role?: string): void {
+  const query: Record<string, string> = {}
+  if (role) query.role = role
+  router.push({ path: '/app/members/new', query })
+}
+
+function openEdit(member: FamilyMember | null | undefined): void {
+  if (!member?.id) return
+  router.push(`/app/members/${member.id}`)
 }
 
 // --- Помощники по супругам ---
@@ -55,6 +92,63 @@ function pairByRoles(members: FamilyMember[], maleRole: string, femaleRole: stri
   return result
 }
 
+/**
+ * Собирает пары через ДЕТЕЙ: для каждого "ребёнка" указанных childRoles
+ * берём его (fatherId, motherId) — это и есть супружеская пара.
+ * Это точнее, чем сопоставление по фамилии: жена и муж не обязаны её разделять.
+ *
+ * Гарантии:
+ *  - каждая уникальная (fatherId, motherId) даёт ровно одну пару;
+ *  - супруги, не упомянутые ни одним ребёнком, добавляются одиночками
+ *    (через fallback `pairByRoles`);
+ *  - порядок: пары с известным мужем идут первыми.
+ */
+function pairByChildren(
+  members: FamilyMember[],
+  childRoles: string[],
+  maleRole: string,
+  femaleRole: string
+): Pair[] {
+  const byId = new Map<number, FamilyMember>()
+  members.forEach((m) => { if (m.id) byId.set(m.id, m) })
+
+  const result: Pair[] = []
+  const seen = new Set<string>()
+  const usedHusbandIds = new Set<number>()
+  const usedWifeIds = new Set<number>()
+
+  members.forEach((child) => {
+    if (!childRoles.includes(child.role)) return
+    const fId = child.fatherId || 0
+    const mId = child.motherId || 0
+    if (!fId && !mId) return
+    const father = fId ? byId.get(fId) : null
+    const mother = mId ? byId.get(mId) : null
+    if (father && father.role !== maleRole) return
+    if (mother && mother.role !== femaleRole) return
+    const key = `pair-${fId}-${mId}`
+    if (seen.has(key)) return
+    seen.add(key)
+    if (father?.id) usedHusbandIds.add(father.id)
+    if (mother?.id) usedWifeIds.add(mother.id)
+    result.push({ husband: father || null, wife: mother || null, key })
+  })
+
+  // Добавляем людей нужных ролей, которые ещё не попали ни в одну пару.
+  members
+    .filter((m) => m.role === maleRole && m.id && !usedHusbandIds.has(m.id))
+    .forEach((h) => {
+      result.push({ husband: h, wife: null, key: `pair-${h.id}-x` })
+    })
+  members
+    .filter((m) => m.role === femaleRole && m.id && !usedWifeIds.has(m.id))
+    .forEach((w) => {
+      result.push({ husband: null, wife: w, key: `pair-x-${w.id}` })
+    })
+
+  return result
+}
+
 const filteredMembers = computed<FamilyMember[]>(() => {
   const q = search.value.trim().toLowerCase()
   if (!q) return memberStore.members
@@ -70,13 +164,18 @@ const generations = computed(() => {
     {
       label: 'Бабушки и дедушки',
       icon: 'elderly',
-      pairs: pairByRoles(m, 'GRANDFATHER', 'GRANDMOTHER'),
+      pairs: pairByChildren(m, ['FATHER', 'MOTHER'], 'GRANDFATHER', 'GRANDMOTHER'),
       members: m.filter((x) => ['GRANDFATHER', 'GRANDMOTHER'].includes(x.role))
     },
     {
       label: 'Родители',
       icon: 'family_restroom',
-      pairs: pairByRoles(m, 'FATHER', 'MOTHER'),
+      pairs: pairByChildren(
+        m,
+        ['SON', 'DAUGHTER', 'BROTHER', 'SISTER'],
+        'FATHER',
+        'MOTHER'
+      ),
       members: m.filter((x) => ['FATHER', 'MOTHER'].includes(x.role))
     },
     {
@@ -170,6 +269,20 @@ function setActive(member: FamilyMember): void {
   activeId.value = activeId.value === member.id ? null : (member.id ?? null)
 }
 
+function ghostRoleFor(missingSide: 'husband' | 'wife', generationLabel: string): string | undefined {
+  // Map the empty pair slot to the role the user most likely wants to add.
+  if (generationLabel === 'Бабушки и дедушки') {
+    return missingSide === 'husband' ? 'GRANDFATHER' : 'GRANDMOTHER'
+  }
+  if (generationLabel === 'Родители') {
+    return missingSide === 'husband' ? 'FATHER' : 'MOTHER'
+  }
+  if (generationLabel === 'Дяди и тёти') {
+    return missingSide === 'husband' ? 'UNCLE' : 'AUNT'
+  }
+  return undefined
+}
+
 // --- SVG-линии между карточками ---
 function recalcLines(): void {
   const stage = stageRef.value
@@ -215,6 +328,16 @@ function recalcLines(): void {
       .map((id) => cardRefs.get(id))
       .filter((el): el is HTMLElement => !!el)
       .map((el) => toLocal(el.getBoundingClientRect()))
+
+    // Если у одного из родителей не хватает супруга, добавляем ghost-карточку
+    // в parentRects, чтобы шина исходила из центра пары, а не из реального родителя.
+    if (g.parentIds.length === 1) {
+      const ghostEl = ghostPairRefs.get(g.parentIds[0])
+      if (ghostEl) {
+        parentRects.push(toLocal(ghostEl.getBoundingClientRect()))
+      }
+    }
+
     const childRects = g.childIds
       .map((id) => cardRefs.get(id))
       .filter((el): el is HTMLElement => !!el)
@@ -239,46 +362,70 @@ function recalcLines(): void {
       activeId.value != null &&
       (g.parentIds.includes(activeId.value) || g.childIds.includes(activeId.value))
 
-    // 1) Стебель от центра родителей вниз до шины.
-    //    Если родителей двое и они на одном уровне, стебель начинается
-    //    от общей "сердечной" точки между ними.
+    // Точка выхода из пары родителей (центр между ними).
     const stemStartY =
       parentRects.length === 2
         ? (parentRects[0].cy + parentRects[1].cy) / 2
         : parentBotY
-    out.push({
-      id: `stem-${g.key}`,
-      d: `M ${parentX},${stemStartY} V ${trunkY}`,
-      kind: 'parent',
-      highlight
-    })
 
-    // 2) Горизонтальная "шина": расширяем до parentX, чтобы не было разрывов
-    //    когда ребёнок один и стоит не под центром родителей.
-    const xs = childRects.map((r) => r.cx)
-    const minXAll = Math.min(...xs, parentX)
-    const maxXAll = Math.max(...xs, parentX)
-    if (maxXAll - minXAll > 0.5) {
+    if (lineStyle.value === 'curve') {
+      // Один цельный путь от пары к каждому ребёнку — cubic Bezier S-curve.
+      childRects.forEach((cr, i) => {
+        const cx = cr.cx
+        const cy = cr.top
+        const dy = cy - stemStartY
+        const dx = cx - parentX
+        const k = Math.min(0.55, 0.32 + Math.abs(dx) / Math.max(1, Math.abs(dy)) * 0.18)
+        out.push({
+          id: `branch-${g.key}-${g.childIds[i]}`,
+          d:
+            `M ${parentX},${stemStartY} ` +
+            `C ${parentX},${stemStartY + dy * k} ` +
+            `${cx},${cy - dy * k} ` +
+            `${cx},${cy}`,
+          kind: 'parent',
+          highlight:
+            activeId.value != null &&
+            (g.parentIds.includes(activeId.value) || activeId.value === g.childIds[i])
+        })
+      })
+    } else {
+      // Прямые ortho-линии: стебель → горизонтальная шина → отводы.
+      const childTopY = Math.min(...childRects.map((r) => r.top))
+      const gap = Math.max(10, childTopY - parentBotY)
+      const trunkY = parentBotY + gap / 2
+
       out.push({
-        id: `bus-${g.key}`,
-        d: `M ${minXAll},${trunkY} H ${maxXAll}`,
+        id: `stem-${g.key}`,
+        d: `M ${parentX},${stemStartY} V ${trunkY}`,
         kind: 'parent',
         highlight
       })
-    }
 
-    // 3) Вертикальные отводы от шины к каждому ребёнку.
-    childRects.forEach((cr, i) => {
-      const x = cr.cx
-      out.push({
-        id: `branch-${g.key}-${g.childIds[i]}`,
-        d: `M ${x},${trunkY} V ${cr.top}`,
-        kind: 'parent',
-        highlight:
-          activeId.value != null &&
-          (g.parentIds.includes(activeId.value) || activeId.value === g.childIds[i])
+      const xs = childRects.map((r) => r.cx)
+      const minXAll = Math.min(...xs, parentX)
+      const maxXAll = Math.max(...xs, parentX)
+      if (maxXAll - minXAll > 0.5) {
+        out.push({
+          id: `bus-${g.key}`,
+          d: `M ${minXAll},${trunkY} H ${maxXAll}`,
+          kind: 'parent',
+          highlight
+        })
+      }
+
+      childRects.forEach((cr, i) => {
+        const x = cr.cx
+        out.push({
+          id: `branch-${g.key}-${g.childIds[i]}`,
+          d: `M ${x},${trunkY} V ${cr.top}`,
+          kind: 'parent',
+          highlight:
+            activeId.value != null &&
+            (g.parentIds.includes(activeId.value) || activeId.value === g.childIds[i])
+        })
       })
-    })
+    }
 
     // 4) Если родитель только один (неполная семья) — рисуем короткую
     //    горизонтальную от его низа к центру шины, чтобы выглядело аккуратнее.
@@ -298,7 +445,7 @@ function scheduleRecalc(): void {
 }
 
 // Перерисовываем линии при изменении членов, шаблона, фильтра, активной карточки
-watch([filteredMembers, template, activeId], scheduleRecalc)
+watch([filteredMembers, template, activeId, lineStyle], scheduleRecalc)
 
 let resizeObserver: ResizeObserver | null = null
 onMounted(() => {
@@ -339,6 +486,27 @@ onBeforeUnmount(() => {
               @click="setTemplate(t)"
             >
               {{ t === 'modern' ? 'Modern' : t === 'classic' ? 'Classic' : 'Print' }}
+            </button>
+          </div>
+
+          <div class="line-style-switch" role="group" aria-label="Стиль линий">
+            <button
+              type="button"
+              class="btn-action"
+              :class="{ primary: lineStyle === 'ortho' }"
+              :title="'Прямые линии'"
+              @click="setLineStyle('ortho')"
+            >
+              <AppIcon name="account_tree" :size="16" /> Прямые
+            </button>
+            <button
+              type="button"
+              class="btn-action"
+              :class="{ primary: lineStyle === 'curve' }"
+              :title="'Плавные кривые'"
+              @click="setLineStyle('curve')"
+            >
+              <AppIcon name="show_chart" :size="16" /> Плавные
             </button>
           </div>
 
@@ -446,12 +614,30 @@ onBeforeUnmount(() => {
                   class="tree-member-card"
                   :class="cardClasses(pair.husband)"
                   @click="setActive(pair.husband!)"
+                  @dblclick="openEdit(pair.husband)"
                 >
                   <MemberMiniCard :member="pair.husband" :compact="template !== 'modern'" />
                   <p class="relation-line">{{ getRelationLabel(pair.husband) }}</p>
                 </article>
+                <article
+                  v-else
+                  :ref="(el) => registerGhostPair(pair.wife?.id, el as HTMLElement)"
+                  class="tree-member-card ghost-card"
+                  role="button"
+                  tabindex="0"
+                  aria-label="Добавить супруга"
+                  title="Добавить супруга"
+                  @click="openCreate(ghostRoleFor('husband', group.label))"
+                  @keydown.enter.prevent="openCreate(ghostRoleFor('husband', group.label))"
+                  @keydown.space.prevent="openCreate(ghostRoleFor('husband', group.label))"
+                >
+                  <div class="ghost-body">
+                    <span class="ghost-icon"><AppIcon name="person_add" :size="20" /></span>
+                    <span class="ghost-text">Супруг не указан</span>
+                  </div>
+                </article>
 
-                <div v-if="pair.husband && pair.wife" class="pair-link" aria-hidden="true">
+                <div class="pair-link" aria-hidden="true">
                   <AppIcon name="favorite" :size="14" />
                 </div>
 
@@ -461,9 +647,27 @@ onBeforeUnmount(() => {
                   class="tree-member-card"
                   :class="cardClasses(pair.wife)"
                   @click="setActive(pair.wife!)"
+                  @dblclick="openEdit(pair.wife)"
                 >
                   <MemberMiniCard :member="pair.wife" :compact="template !== 'modern'" />
                   <p class="relation-line">{{ getRelationLabel(pair.wife) }}</p>
+                </article>
+                <article
+                  v-else
+                  :ref="(el) => registerGhostPair(pair.husband?.id, el as HTMLElement)"
+                  class="tree-member-card ghost-card"
+                  role="button"
+                  tabindex="0"
+                  aria-label="Добавить супругу"
+                  title="Добавить супругу"
+                  @click="openCreate(ghostRoleFor('wife', group.label))"
+                  @keydown.enter.prevent="openCreate(ghostRoleFor('wife', group.label))"
+                  @keydown.space.prevent="openCreate(ghostRoleFor('wife', group.label))"
+                >
+                  <div class="ghost-body">
+                    <span class="ghost-icon"><AppIcon name="person_add" :size="20" /></span>
+                    <span class="ghost-text">Супруга не указана</span>
+                  </div>
                 </article>
               </div>
             </div>
@@ -476,6 +680,7 @@ onBeforeUnmount(() => {
                 class="tree-member-card"
                 :class="cardClasses(member)"
                 @click="setActive(member)"
+                @dblclick="openEdit(member)"
               >
                 <MemberMiniCard :member="member" :compact="template !== 'modern'" />
                 <p class="relation-line">{{ getRelationLabel(member) }}</p>
@@ -506,6 +711,23 @@ onBeforeUnmount(() => {
 .template-switch {
   display: flex;
   gap: 8px;
+}
+
+.line-style-switch {
+  display: flex;
+  gap: 6px;
+}
+
+@media (max-width: 600px) {
+  .line-style-switch {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .line-style-switch .btn-action {
+    justify-content: center;
+    padding: 8px 4px;
+  }
 }
 
 .search-wrap {
@@ -738,6 +960,52 @@ onBeforeUnmount(() => {
 
 .tree-member-card.card-dimmed {
   opacity: 0.35;
+}
+
+/* --- Ghost (missing spouse / expected parent) --- */
+.tree-member-card.ghost-card {
+  cursor: pointer;
+  border: 1.5px dashed var(--color-glass-border);
+  background: var(--color-surface);
+  border-radius: 16px;
+  padding: 18px;
+  min-height: 88px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.65;
+  transition: opacity var(--transition-fast), border-color var(--transition-fast),
+    background var(--transition-fast), transform var(--transition-fast);
+}
+
+.tree-member-card.ghost-card:hover,
+.tree-member-card.ghost-card:focus-visible {
+  opacity: 1;
+  border-color: var(--color-accent);
+  background: var(--color-surface-hover);
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.ghost-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+.ghost-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--color-glass);
+  border: 1px dashed var(--color-glass-border);
+  color: var(--color-text-secondary);
 }
 
 .relation-line {
