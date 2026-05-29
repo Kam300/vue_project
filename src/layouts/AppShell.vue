@@ -30,17 +30,29 @@ async function cycleTheme(): Promise<void> {
 }
 
 const navItems = [
-  { to: '/app/members', label: 'Семья', icon: 'members', mobileNav: true },
-  { to: '/app/tree', label: 'Древо', icon: 'tree', mobileNav: true },
-  { to: '/app/photos', label: 'Фото + ИИ', icon: 'photos', mobileNav: true },
-  { to: '/app/export', label: 'Экспорт', icon: 'export', mobileNav: false },
-  { to: '/app/backup', label: 'Резерв', icon: 'backup', mobileNav: true },
-  { to: '/app/server', label: 'Сервер', icon: 'server', mobileNav: false },
-  { to: '/app/settings', label: 'Настройки', icon: 'settings', mobileNav: true },
-  { to: '/app/about', label: 'О проекте', icon: 'about', mobileNav: false },
+  { to: '/app/members', label: 'Семья', icon: 'members', mobileNav: true, adminOnly: false },
+  { to: '/app/tree', label: 'Древо', icon: 'tree', mobileNav: true, adminOnly: false },
+  { to: '/app/photos', label: 'Фото + ИИ', icon: 'photos', mobileNav: true, adminOnly: false },
+  { to: '/app/export', label: 'Экспорт', icon: 'export', mobileNav: false, adminOnly: false },
+  { to: '/app/backup', label: 'Резерв', icon: 'backup', mobileNav: true, adminOnly: false },
+  { to: '/app/server', label: 'Сервер', icon: 'server', mobileNav: false, adminOnly: true },
+  { to: '/app/admin', label: 'Админ', icon: 'admin', mobileNav: false, adminOnly: true },
+  { to: '/app/settings', label: 'Настройки', icon: 'settings', mobileNav: true, adminOnly: false },
+  { to: '/app/about', label: 'О проекте', icon: 'about', mobileNav: false, adminOnly: false },
 ]
 
-const mobileNavItems = computed(() => navItems.filter(item => item.mobileNav))
+const visibleNavItems = computed(() =>
+  navItems.filter((item) => !item.adminOnly || appStore.isAdmin)
+)
+
+const mobileNavItems = computed(() => visibleNavItems.value.filter(item => item.mobileNav))
+
+const navHidden = computed(() =>
+  appStore.requiresOnboarding ||
+  appStore.requiresLock ||
+  route.path === '/app/onboarding' ||
+  route.path === '/app/lock'
+)
 
 const currentThemeIcon = computed(() => {
   if (appStore.settings.theme === 'dark') return 'dark_mode'
@@ -121,7 +133,7 @@ watch(
               <path d="M7 11V7a5 5 0 0110 0v4"/>
             </svg>
           </button>
-          <button class="btn-icon-action mobile-menu-btn" @click="toggleMobileMenu" :class="{ active: mobileMenuOpen }">
+          <button v-if="!navHidden" class="btn-icon-action mobile-menu-btn" @click="toggleMobileMenu" :class="{ active: mobileMenuOpen }">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <template v-if="!mobileMenuOpen">
                 <line x1="3" y1="6" x2="21" y2="6"/>
@@ -138,10 +150,10 @@ watch(
       </div>
 
       <!-- Desktop nav -->
-      <div class="app-container desktop-nav-wrap">
+      <div v-if="!navHidden" class="app-container desktop-nav-wrap">
         <nav class="app-nav">
           <RouterLink
-            v-for="item in navItems"
+            v-for="item in visibleNavItems"
             :key="item.to"
             :to="item.to"
             class="nav-link"
@@ -170,6 +182,10 @@ watch(
             <svg v-if="item.icon === 'server'" class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
               <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="18" r="1"/>
             </svg>
+            <!-- Admin -->
+            <svg v-if="item.icon === 'admin'" class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <path d="M12 2l8 4v6c0 5-3.5 9.5-8 10-4.5-.5-8-5-8-10V6l8-4z"/><path d="M9 12l2 2 4-4"/>
+            </svg>
             <!-- Settings -->
             <svg v-if="item.icon === 'settings'" class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
               <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
@@ -188,7 +204,7 @@ watch(
         <div v-if="mobileMenuOpen" class="mobile-dropdown" @click="closeMobileMenu">
           <nav class="mobile-dropdown-nav">
             <RouterLink
-              v-for="item in navItems"
+              v-for="item in visibleNavItems"
               :key="item.to"
               :to="item.to"
               class="mobile-dropdown-link"
@@ -201,7 +217,7 @@ watch(
     </header>
 
     <!-- Mobile bottom nav -->
-    <nav class="mobile-bottom-nav">
+    <nav v-if="!navHidden" class="mobile-bottom-nav">
       <RouterLink
         v-for="item in mobileNavItems"
         :key="item.to"

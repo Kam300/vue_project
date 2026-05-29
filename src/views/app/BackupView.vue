@@ -6,7 +6,7 @@ import YandexIdButton from '@/components/shared/YandexIdButton.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useMemberStore } from '@/stores/memberStore'
 import { addBackupAudit, getBackupAudit } from '@/db/repositories'
-import { backupDelete, backupDownload, backupMeta, backupUpload } from '@/services/api'
+import { backupDelete, backupDownload, backupMeta, backupUpload, authLogout } from '@/services/api'
 import { createBackupArchive, restoreBackupArchive } from '@/services/backupArchive'
 import { syncProfileFaces } from '@/services/familySync'
 import { connectPortableIdentityAndSync } from '@/services/portableIdentitySync'
@@ -176,6 +176,18 @@ async function refreshPortableState(): Promise<void> {
     status.value = 'Статус переносимой учётной записи обновлён.'
   } catch (reason) {
     error.value = `Не удалось обновить статус: ${(reason as Error).message || 'unknown error'}`
+  }
+}
+
+async function disconnectIdentity(): Promise<void> {
+  if (!confirm('Отключить учётную запись? Локальные данные останутся, но серверный backup станет недоступен.')) return
+  clearMessages()
+  try {
+    await authLogout().catch(() => {})
+    await appStore.refreshAuthState()
+    status.value = 'Учётная запись отключена.'
+  } catch (reason) {
+    error.value = `Не удалось отключить: ${(reason as Error).message || 'unknown error'}`
   }
 }
 
@@ -423,7 +435,7 @@ async function removeRemoteBackup(): Promise<void> {
           <span v-if="portableIdentity.displayName">{{ portableIdentity.displayName }}</span>
         </div>
 
-        <div class="btn-row">
+        <div class="btn-row" v-if="!portableIdentity">
           <YandexIdButton
             @click="connectProvider('yandex')"
             :disabled="authBusy !== '' || !yandexConfigured"
@@ -438,6 +450,15 @@ async function removeRemoteBackup(): Promise<void> {
           </button>
           <button class="btn-action" @click="refreshPortableState" :disabled="authBusy !== '' || metaBusy">
             Обновить статус
+          </button>
+        </div>
+
+        <div class="btn-row" v-else>
+          <button class="btn-action" @click="refreshPortableState" :disabled="authBusy !== '' || metaBusy">
+            Обновить статус
+          </button>
+          <button class="btn-action btn-danger" @click="disconnectIdentity">
+            Выйти
           </button>
         </div>
 
@@ -604,5 +625,15 @@ async function removeRemoteBackup(): Promise<void> {
 
 .error {
   color: var(--color-error);
+}
+
+.btn-danger {
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #f87171;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.6);
 }
 </style>

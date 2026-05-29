@@ -3,7 +3,7 @@ import { defineStore } from 'pinia'
 import type { AuthBootstrapResponse, AuthIdentityResponse } from '@/types/api'
 import type { AppSettingsState } from '@/types/models'
 import { DEFAULT_APP_SETTINGS, getAppSettings, patchAppSettings } from '@/db/repositories'
-import { authBootstrap, setApiBaseUrl } from '@/services/api'
+import { authBootstrap, presencePing, setApiBaseUrl } from '@/services/api'
 import { sha256FromString } from '@/utils/crypto'
 
 const SESSION_STORAGE_KEYS = {
@@ -62,6 +62,8 @@ export const useAppStore = defineStore('app', () => {
     return providers.find((provider) => provider.provider !== 'local') || null
   })
 
+  const isAdmin = computed<boolean>(() => Boolean(authUser.value?.isAdmin))
+
   function applyTheme(theme: AppSettingsState['theme']): void {
     const root = document.documentElement
     if (theme === 'system') {
@@ -115,6 +117,17 @@ export const useAppStore = defineStore('app', () => {
     } catch {
       authProviders.value = null
       authUser.value = null
+    }
+
+    // Presence heartbeat (тихо, без падений если оффлайн)
+    if (typeof window !== 'undefined') {
+      const ping = (): void => {
+        const deviceId = settings.value.deviceId
+        if (!deviceId) return
+        void presencePing(deviceId).catch(() => {})
+      }
+      ping()
+      window.setInterval(ping, 30_000)
     }
   }
 
@@ -181,6 +194,7 @@ export const useAppStore = defineStore('app', () => {
     authProviders,
     authUser,
     portableIdentity,
+    isAdmin,
     init,
     refreshAuthState,
     updateSettings,

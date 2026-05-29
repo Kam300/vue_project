@@ -169,6 +169,7 @@ export interface AuthUserResponse {
   displayName: string
   email?: string | null
   preferredAuthProvider?: string | null
+  isAdmin?: boolean
   providers: AuthIdentityResponse[]
 }
 
@@ -182,4 +183,111 @@ export interface AuthBootstrapResponse {
     authenticated: boolean
     user: AuthUserResponse | null
   }
+}
+
+
+// ============================================================
+// ADMIN
+// ============================================================
+
+export interface AdminStatsResponse {
+  success: boolean
+  users: { total: number; admins: number }
+  persons: number
+  photos: number
+  relationships: number
+  family_trees: number
+  backups: { count: number; total_bytes: number; files: number }
+  database: { path: string; size_bytes: number }
+  audit_logs: number
+  face_encodings: number
+  presence?: {
+    total: number
+    authorized: number
+    anonymous: number
+    window_seconds: number
+  }
+  error?: string
+}
+
+export interface AdminUserItem {
+  id: number
+  displayName: string
+  email: string | null
+  phone: string | null
+  preferredAuthProvider: string | null
+  isAdmin: boolean
+  lastLoginAt: string | null
+  createdAt: string | null
+  providers: string[]
+  personsCount: number
+  backupsCount: number
+}
+
+export interface AdminUsersResponse {
+  success: boolean
+  users: AdminUserItem[]
+  error?: string
+}
+
+export interface AdminBackupItem {
+  id: number
+  treeId: number
+  treeTitle: string | null
+  ownerUserId: number | null
+  ownerName: string | null
+  ownerEmail: string | null
+  storagePath: string
+  fileExists: boolean
+  sizeBytes: number | null
+  membersCount: number
+  memberPhotosCount: number
+  assetsCount: number
+  compression: string | null
+  checksumSha256: string | null
+  source: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AdminBackupsResponse {
+  success: boolean
+  backups: AdminBackupItem[]
+  error?: string
+}
+
+export interface AdminAuditLogItem {
+  id: number
+  treeId: number
+  userId: number | null
+  userName: string | null
+  action: string
+  entityType: string | null
+  entityId: string | null
+  detailsJson: string | null
+  createdAt: string
+}
+
+export interface AdminAuditResponse {
+  success: boolean
+  logs: AdminAuditLogItem[]
+  error?: string
+}
+
+export interface AdminFaceItem {
+  id: number
+  personId: number
+  personName: string | null
+  externalMemberId: string | null
+  modelVersion: string
+  isActive: boolean
+  referencePhotoPath: string | null
+  createdAt: string
+}
+
+export interface AdminFacesResponse {
+  success: boolean
+  count: number
+  encodings: AdminFaceItem[]
+  error?: string
 }

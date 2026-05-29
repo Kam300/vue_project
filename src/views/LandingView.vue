@@ -5,6 +5,7 @@ import LandingPage from '@/components/LandingPage.vue'
 import YandexIdButton from '@/components/shared/YandexIdButton.vue'
 import SyncProgress from '@/components/shared/SyncProgress.vue'
 import { connectPortableIdentityAndSync } from '@/services/portableIdentitySync'
+import { authLogout } from '@/services/api'
 import { useAppStore } from '@/stores/appStore'
 
 const appStore = useAppStore()
@@ -17,6 +18,7 @@ const authProgress = ref(0)
 const authProgressLabel = ref('')
 const authReady = ref(false)
 const authInitBusy = ref(false)
+const logoutBusy = ref(false)
 
 const yandexConfigured = computed(() => Boolean(appStore.authProviders?.yandex?.configured))
 const vkConfigured = computed(() => Boolean(appStore.authProviders?.vk?.configured))
@@ -73,6 +75,22 @@ async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void>
   }
 }
 
+async function disconnectPortableIdentity(): Promise<void> {
+  if (!confirm('Отключить Яндекс ID? Локальные данные останутся, но пропадёт связка с серверным backup.')) return
+  logoutBusy.value = true
+  authError.value = ''
+  authStatus.value = ''
+  try {
+    await authLogout().catch(() => {})
+    await appStore.refreshAuthState()
+    authStatus.value = 'Яндекс ID отключён'
+  } catch (reason) {
+    authError.value = `Не удалось отключить: ${(reason as Error).message || 'unknown error'}`
+  } finally {
+    logoutBusy.value = false
+  }
+}
+
 onMounted(() => {
   void ensureLandingAuthReady()
 })
@@ -82,36 +100,57 @@ onMounted(() => {
   <div class="landing-wrap">
     <LandingPage>
       <template #hero-accessory>
-        <aside class="portable-auth-box">
-          <p class="portable-auth-title">Подключите вход для переноса backup между устройствами</p>
-          <p v-if="authInitBusy" class="portable-auth-hint">Проверяем доступные способы входа...</p>
-          <p v-else-if="hasPortableIdentity" class="portable-auth-status ok">
-            {{ portableIdentityTitle }}
-            <span v-if="portableIdentityName">{{ portableIdentityName }}</span>
-          </p>
+        <aside class="portable-auth-box" :class="{ 'is-connected': hasPortableIdentity }">
+          <template v-if="!hasPortableIdentity">
+            <p class="portable-auth-title">Подключите вход для переноса backup между устройствами</p>
+            <p v-if="authInitBusy" class="portable-auth-hint">Проверяем доступные способы входа...</p>
 
-          <span class="portable-auth-label">Войти с помощью</span>
-          <div class="portable-auth-actions">
-            <YandexIdButton
-              class="portable-auth-btn portable-auth-btn-yandex"
-              @click="connectPortableIdentity('yandex')"
-              :disabled="authInitBusy || Boolean(authBusy) || !yandexConfigured"
-              :loading="authBusy === 'yandex'"
+            <span class="portable-auth-label">Войти с помощью</span>
+            <div class="portable-auth-actions">
+              <YandexIdButton
+                class="portable-auth-btn portable-auth-btn-yandex"
+                @click="connectPortableIdentity('yandex')"
+                :disabled="authInitBusy || Boolean(authBusy) || !yandexConfigured"
+                :loading="authBusy === 'yandex'"
+              />
+              <button
+                class="portable-auth-btn portable-auth-btn-vk"
+                @click="connectPortableIdentity('vk')"
+                :disabled="authInitBusy || Boolean(authBusy) || !vkConfigured"
+              >
+                {{ authBusy === 'vk' ? 'Подключение...' : 'Войти с VK ID' }}
+              </button>
+            </div>
+
+            <SyncProgress
+              :visible="Boolean(authBusy)"
+              :progress="authProgress"
+              :label="authProgressLabel"
             />
-            <button
-              class="portable-auth-btn portable-auth-btn-vk"
-              @click="connectPortableIdentity('vk')"
-              :disabled="authInitBusy || Boolean(authBusy) || !vkConfigured"
-            >
-              {{ authBusy === 'vk' ? 'Подключение...' : 'Войти с VK ID' }}
-            </button>
-          </div>
+          </template>
 
-          <SyncProgress
-            :visible="Boolean(authBusy)"
-            :progress="authProgress"
-            :label="authProgressLabel"
-          />
+          <template v-else>
+            <div class="portable-auth-connected">
+              <span class="portable-auth-check">✓</span>
+              <div>
+                <p class="portable-auth-title">{{ portableIdentityTitle }}</p>
+                <p v-if="portableIdentityName" class="portable-auth-username">{{ portableIdentityName }}</p>
+              </div>
+            </div>
+
+            <div class="portable-auth-actions">
+              <RouterLink to="/app/members" class="portable-auth-btn portable-auth-btn-primary">
+                Открыть приложение
+              </RouterLink>
+              <button
+                class="portable-auth-btn portable-auth-btn-ghost"
+                @click="disconnectPortableIdentity"
+                :disabled="logoutBusy"
+              >
+                {{ logoutBusy ? 'Отключаем...' : 'Выйти' }}
+              </button>
+            </div>
+          </template>
 
           <p v-if="authStatus" class="portable-auth-status ok">{{ authStatus }}</p>
           <p v-if="authError" class="portable-auth-status err">{{ authError }}</p>
@@ -122,7 +161,7 @@ onMounted(() => {
             Скачать Android APK
           </a>
 
-          <RouterLink class="open-app-btn" to="/app/members">
+          <RouterLink v-if="!hasPortableIdentity" class="open-app-btn" to="/app/members">
             Открыть web-приложение
           </RouterLink>
         </div>
@@ -152,6 +191,70 @@ onMounted(() => {
   -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
   box-shadow: var(--shadow-elevated);
+  transition: border-color 0.25s ease, background 0.25s ease;
+}
+
+.portable-auth-box.is-connected {
+  border-color: rgba(52, 211, 153, 0.4);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--color-bg-alt) 92%, transparent),
+    rgba(52, 211, 153, 0.08)
+  );
+}
+
+.portable-auth-connected {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.portable-auth-check {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(52, 211, 153, 0.15);
+  color: #34d399;
+  font-weight: 700;
+  font-size: 1.1rem;
+  border: 1px solid rgba(52, 211, 153, 0.4);
+}
+
+.portable-auth-username {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.portable-auth-btn-primary {
+  background: var(--gradient-accent);
+  color: #fff;
+  border-color: transparent;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.portable-auth-btn-primary:hover:not(:disabled) {
+  background: var(--gradient-accent-hover);
+  box-shadow: 0 6px 20px rgba(124, 92, 252, 0.35);
+}
+
+.portable-auth-btn-ghost {
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.portable-auth-btn-ghost:hover:not(:disabled) {
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.08);
 }
 
 .portable-auth-label {
@@ -196,19 +299,27 @@ onMounted(() => {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+  align-items: stretch;
 }
 
 .portable-auth-btn {
-  min-height: 44px;
+  min-height: 48px;
   border-radius: 16px;
   border: 1px solid var(--color-glass-border);
   background: rgba(22, 27, 41, 0.94);
   background: color-mix(in srgb, var(--color-surface) 94%, transparent);
   color: var(--color-text);
   font: inherit;
+  font-size: 0.92rem;
   font-weight: 600;
-  padding: 0 16px;
+  padding: 10px 14px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  white-space: nowrap;
+  line-height: 1.2;
   transition:
     transform var(--transition-normal),
     border-color var(--transition-normal),

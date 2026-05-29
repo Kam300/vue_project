@@ -295,13 +295,12 @@ def attach_yandex_identity(db_path: Path, device_id: str, profile: dict[str, Any
     phone = str(profile.get('default_phone') or '').strip() or None
     avatar_url = str(profile.get('default_avatar_id') or '').strip() or None
 
-    local_snapshot = ensure_local_user(db_path, normalized_device_id, display_name)
-    local_user_id = int(local_snapshot['user']['id'])
-
     connection = db_connect(db_path)
     try:
         now = utcnow_sql()
-        existing_identity = connection.execute(
+
+        # 1) Уже есть Yandex-identity → берём её user_id
+        existing_yandex = connection.execute(
             """
             SELECT * FROM auth_identities
             WHERE provider = 'yandex' AND provider_user_id = ?
@@ -309,13 +308,42 @@ def attach_yandex_identity(db_path: Path, device_id: str, profile: dict[str, Any
             """,
             (provider_user_id,),
         ).fetchone()
-        target_user_id = int(existing_identity['user_id']) if existing_identity else local_user_id
+
+        target_user_id: int
+        if existing_yandex:
+            target_user_id = int(existing_yandex['user_id'])
+        else:
+            # 2) Есть гостевой local-user по device_id → апгрейдим его
+            device_key = f'device:{normalized_device_id}'
+            existing_local = connection.execute(
+                """
+                SELECT user_id FROM auth_identities
+                WHERE provider = 'local' AND provider_user_id = ?
+                LIMIT 1
+                """,
+                (device_key,),
+            ).fetchone()
+
+            if existing_local:
+                target_user_id = int(existing_local['user_id'])
+            else:
+                # 3) Создаём нового user сразу с yandex (без local-фолбэка)
+                cursor = connection.execute(
+                    """
+                    INSERT INTO users (
+                        display_name, email, phone, preferred_auth_provider,
+                        last_login_at, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, 'yandex', ?, ?, ?)
+                    """,
+                    (display_name, email, phone, now, now, now),
+                )
+                target_user_id = int(cursor.lastrowid)
 
         _ensure_user_settings(connection, target_user_id, normalized_device_id)
-        _ensure_local_identity_link(connection, target_user_id, normalized_device_id, display_name)
 
         profile_json = json.dumps(profile, ensure_ascii=False)
-        if existing_identity:
+        if existing_yandex:
             connection.execute(
                 """
                 UPDATE auth_identities
@@ -332,7 +360,7 @@ def attach_yandex_identity(db_path: Path, device_id: str, profile: dict[str, Any
                     profile_json,
                     now,
                     now,
-                    existing_identity['id'],
+                    existing_yandex['id'],
                 ),
             )
         else:
@@ -368,6 +396,31 @@ def attach_yandex_identity(db_path: Path, device_id: str, profile: dict[str, Any
             """,
             (display_name, email, phone, now, now, target_user_id),
         )
+
+        # Ensure ровно одна local-identity для этого device_id (для bootstrap по deviceId).
+        # Не создаёт дубли — INSERT OR IGNORE по UNIQUE(provider, provider_user_id).
+        device_key = f'device:{normalized_device_id}'
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO auth_identities (
+                user_id, provider, provider_user_id, email, phone,
+                display_name, avatar_url, profile_json, last_login_at,
+                created_at, updated_at
+            )
+            VALUES (?, 'local', ?, NULL, NULL, ?, NULL, NULL, ?, ?, ?)
+            """,
+            (target_user_id, device_key, display_name, now, now, now),
+        )
+        # Если local-запись уже есть, но привязана к другому user — перепривязываем
+        connection.execute(
+            """
+            UPDATE auth_identities
+            SET user_id = ?, last_login_at = ?, updated_at = ?
+            WHERE provider = 'local' AND provider_user_id = ? AND user_id != ?
+            """,
+            (target_user_id, now, now, device_key, target_user_id),
+        )
+
         connection.commit()
         return get_auth_snapshot(db_path, target_user_id)
     finally:
@@ -414,6 +467,7 @@ def get_auth_snapshot(db_path: Path, user_id: int) -> dict[str, Any]:
                 'displayName': user['display_name'],
                 'email': user['email'],
                 'preferredAuthProvider': user['preferred_auth_provider'],
+                'isAdmin': bool(user['is_admin']) if 'is_admin' in user.keys() else False,
                 'providers': providers,
             }
         }
@@ -699,5 +753,351 @@ def delete_backup(db_path: Path, base_dir: Path, user_id: int) -> dict[str, Any]
         )
         connection.commit()
         return {'success': True, 'schemaVersion': int(row['schema_version']), 'deleted': deleted}
+    finally:
+        connection.close()
+
+
+
+# ============================================================
+# ADMIN
+# ============================================================
+
+def is_user_admin(db_path: Path, user_id: int) -> bool:
+    connection = db_connect(db_path)
+    try:
+        row = connection.execute(
+            'SELECT is_admin FROM users WHERE id = ? LIMIT 1', (user_id,)
+        ).fetchone()
+        return bool(row and row['is_admin'])
+    finally:
+        connection.close()
+
+
+def get_admin_stats(db_path: Path, base_dir: Path) -> dict[str, Any]:
+    connection = db_connect(db_path)
+    try:
+        def count(table: str) -> int:
+            try:
+                row = connection.execute(f'SELECT COUNT(*) AS c FROM {table}').fetchone()
+                return int(row['c']) if row else 0
+            except sqlite3.OperationalError:
+                return 0
+
+        users_total = count('users')
+        admins_total = int(connection.execute(
+            'SELECT COUNT(*) AS c FROM users WHERE is_admin = 1'
+        ).fetchone()['c'])
+
+        backup_storage = base_dir / 'backup_storage_sql'
+        backup_files = []
+        backup_total_bytes = 0
+        if backup_storage.exists():
+            for path in backup_storage.rglob('*.zip'):
+                try:
+                    size = path.stat().st_size
+                    backup_total_bytes += size
+                    backup_files.append({
+                        'path': str(path.relative_to(base_dir)),
+                        'size': size,
+                        'mtime': datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat().replace('+00:00', 'Z'),
+                    })
+                except OSError:
+                    continue
+
+        db_size = 0
+        try:
+            db_size = db_path.stat().st_size
+        except OSError:
+            pass
+
+        return {
+            'users': {
+                'total': users_total,
+                'admins': admins_total,
+            },
+            'persons': count('persons'),
+            'photos': count('photos'),
+            'relationships': count('relationships'),
+            'family_trees': count('family_trees'),
+            'backups': {
+                'count': count('backup_snapshots'),
+                'total_bytes': backup_total_bytes,
+                'files': len(backup_files),
+            },
+            'database': {
+                'path': str(db_path),
+                'size_bytes': db_size,
+            },
+            'audit_logs': count('audit_logs'),
+            'face_encodings': count('face_encodings'),
+        }
+    finally:
+        connection.close()
+
+
+def list_users_admin(db_path: Path) -> list[dict[str, Any]]:
+    connection = db_connect(db_path)
+    try:
+        rows = connection.execute("""
+            SELECT u.id, u.display_name, u.email, u.phone, u.preferred_auth_provider,
+                   u.is_admin, u.last_login_at, u.created_at,
+                   (SELECT GROUP_CONCAT(provider, ',') FROM auth_identities WHERE user_id = u.id) AS providers,
+                   (SELECT COUNT(*) FROM persons p
+                    JOIN family_trees t ON t.id = p.tree_id
+                    WHERE t.owner_user_id = u.id) AS persons_count,
+                   (SELECT COUNT(*) FROM backup_snapshots b
+                    JOIN family_trees t ON t.id = b.tree_id
+                    WHERE t.owner_user_id = u.id) AS backups_count
+            FROM users u
+            ORDER BY u.created_at DESC
+        """).fetchall()
+        return [
+            {
+                'id': int(row['id']),
+                'displayName': row['display_name'],
+                'email': row['email'],
+                'phone': row['phone'],
+                'preferredAuthProvider': row['preferred_auth_provider'],
+                'isAdmin': bool(row['is_admin']),
+                'lastLoginAt': row['last_login_at'],
+                'createdAt': row['created_at'],
+                'providers': (row['providers'] or '').split(',') if row['providers'] else [],
+                'personsCount': int(row['persons_count'] or 0),
+                'backupsCount': int(row['backups_count'] or 0),
+            }
+            for row in rows
+        ]
+    finally:
+        connection.close()
+
+
+def set_user_admin(db_path: Path, user_id: int, is_admin: bool) -> None:
+    connection = db_connect(db_path)
+    try:
+        connection.execute(
+            'UPDATE users SET is_admin = ?, updated_at = ? WHERE id = ?',
+            (1 if is_admin else 0, utcnow_sql(), user_id),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def delete_user_admin(db_path: Path, base_dir: Path, user_id: int) -> dict[str, Any]:
+    connection = db_connect(db_path)
+    try:
+        row = connection.execute(
+            'SELECT is_admin FROM users WHERE id = ?', (user_id,)
+        ).fetchone()
+        if row is None:
+            return {'success': False, 'error': 'User not found'}
+        if row['is_admin']:
+            return {'success': False, 'error': 'Cannot delete admin user'}
+
+        backup_rows = connection.execute("""
+            SELECT b.storage_path FROM backup_snapshots b
+            JOIN family_trees t ON t.id = b.tree_id
+            WHERE t.owner_user_id = ?
+        """, (user_id,)).fetchall()
+
+        for br in backup_rows:
+            try:
+                p = resolve_storage_path(base_dir, br['storage_path'])
+                if p.exists():
+                    p.unlink()
+                    try:
+                        p.parent.rmdir()
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+
+        connection.execute('DELETE FROM users WHERE id = ?', (user_id,))
+        connection.commit()
+        return {'success': True}
+    finally:
+        connection.close()
+
+
+def list_all_backups_admin(db_path: Path, base_dir: Path) -> list[dict[str, Any]]:
+    connection = db_connect(db_path)
+    try:
+        rows = connection.execute("""
+            SELECT b.*, u.display_name AS owner_name, u.email AS owner_email,
+                   t.title AS tree_title
+            FROM backup_snapshots b
+            JOIN family_trees t ON t.id = b.tree_id
+            LEFT JOIN users u ON u.id = t.owner_user_id
+            ORDER BY datetime(b.updated_at) DESC
+        """).fetchall()
+        result = []
+        for row in rows:
+            absolute_path = resolve_storage_path(base_dir, row['storage_path'])
+            result.append({
+                'id': int(row['id']),
+                'treeId': int(row['tree_id']),
+                'treeTitle': row['tree_title'],
+                'ownerUserId': int(row['created_by_user_id']) if row['created_by_user_id'] else None,
+                'ownerName': row['owner_name'],
+                'ownerEmail': row['owner_email'],
+                'storagePath': row['storage_path'],
+                'fileExists': absolute_path.exists(),
+                'sizeBytes': int(row['size_bytes']) if row['size_bytes'] is not None else None,
+                'membersCount': int(row['members_count']),
+                'memberPhotosCount': int(row['member_photos_count']),
+                'assetsCount': int(row['assets_count']),
+                'compression': row['compression'],
+                'checksumSha256': row['checksum_sha256'],
+                'source': row['source'],
+                'createdAt': row['created_at'],
+                'updatedAt': row['updated_at'],
+            })
+        return result
+    finally:
+        connection.close()
+
+
+def delete_backup_admin(db_path: Path, base_dir: Path, backup_id: int) -> dict[str, Any]:
+    connection = db_connect(db_path)
+    try:
+        row = connection.execute(
+            'SELECT * FROM backup_snapshots WHERE id = ?', (backup_id,)
+        ).fetchone()
+        if row is None:
+            return {'success': False, 'error': 'Backup not found'}
+
+        absolute_path = resolve_storage_path(base_dir, row['storage_path'])
+        deleted = False
+        if absolute_path.exists():
+            absolute_path.unlink()
+            deleted = True
+            try:
+                absolute_path.parent.rmdir()
+            except OSError:
+                pass
+
+        connection.execute('DELETE FROM backup_snapshots WHERE id = ?', (backup_id,))
+        connection.commit()
+        return {'success': True, 'deleted': deleted}
+    finally:
+        connection.close()
+
+
+def list_audit_logs_admin(db_path: Path, limit: int = 100) -> list[dict[str, Any]]:
+    connection = db_connect(db_path)
+    try:
+        rows = connection.execute("""
+            SELECT a.*, u.display_name AS user_name
+            FROM audit_logs a
+            LEFT JOIN users u ON u.id = a.user_id
+            ORDER BY datetime(a.created_at) DESC
+            LIMIT ?
+        """, (int(limit),)).fetchall()
+        return [
+            {
+                'id': int(row['id']),
+                'treeId': int(row['tree_id']),
+                'userId': int(row['user_id']) if row['user_id'] else None,
+                'userName': row['user_name'],
+                'action': row['action'],
+                'entityType': row['entity_type'],
+                'entityId': row['entity_id'],
+                'detailsJson': row['details_json'],
+                'createdAt': row['created_at'],
+            }
+            for row in rows
+        ]
+    finally:
+        connection.close()
+
+
+def list_face_encodings_admin(db_path: Path) -> dict[str, Any]:
+    connection = db_connect(db_path)
+    try:
+        rows = connection.execute("""
+            SELECT fe.id, fe.person_id, fe.external_member_id, fe.model_version,
+                   fe.is_active, fe.reference_photo_path, fe.created_at,
+                   p.first_name, p.last_name
+            FROM face_encodings fe
+            LEFT JOIN persons p ON p.id = fe.person_id
+            ORDER BY datetime(fe.created_at) DESC
+        """).fetchall()
+
+        encodings = [
+            {
+                'id': int(row['id']),
+                'personId': int(row['person_id']),
+                'personName': f"{row['first_name'] or ''} {row['last_name'] or ''}".strip() or None,
+                'externalMemberId': row['external_member_id'],
+                'modelVersion': row['model_version'],
+                'isActive': bool(row['is_active']),
+                'referencePhotoPath': row['reference_photo_path'],
+                'createdAt': row['created_at'],
+            }
+            for row in rows
+        ]
+        return {
+            'count': len(encodings),
+            'encodings': encodings,
+        }
+    finally:
+        connection.close()
+
+
+
+def bulk_delete_users_admin(
+    db_path: Path, base_dir: Path, user_ids: list[int], current_admin_id: int
+) -> dict[str, Any]:
+    """
+    Удаляет пользователей из списка. Пропускает админов и текущего админа.
+    Возвращает {deleted: int, skipped: list[{id, reason}]}.
+    """
+    deleted_count = 0
+    skipped: list[dict[str, Any]] = []
+
+    for uid in user_ids:
+        try:
+            uid_int = int(uid)
+        except (TypeError, ValueError):
+            skipped.append({'id': uid, 'reason': 'invalid_id'})
+            continue
+        if uid_int == current_admin_id:
+            skipped.append({'id': uid_int, 'reason': 'self'})
+            continue
+        result = delete_user_admin(db_path, base_dir, uid_int)
+        if result.get('success'):
+            deleted_count += 1
+        else:
+            skipped.append({'id': uid_int, 'reason': result.get('error', 'unknown')})
+
+    return {'success': True, 'deleted': deleted_count, 'skipped': skipped}
+
+
+
+def delete_face_encoding_admin(db_path: Path, face_id: int) -> dict[str, Any]:
+    connection = db_connect(db_path)
+    try:
+        row = connection.execute(
+            'SELECT id, reference_photo_path FROM face_encodings WHERE id = ?',
+            (face_id,),
+        ).fetchone()
+        if row is None:
+            return {'success': False, 'error': 'Face encoding not found'}
+
+        ref_path = row['reference_photo_path']
+        connection.execute('DELETE FROM face_encodings WHERE id = ?', (face_id,))
+        connection.commit()
+
+        if ref_path:
+            try:
+                file_path = Path(ref_path)
+                if not file_path.is_absolute():
+                    file_path = Path(__file__).parent / file_path
+                if file_path.exists():
+                    file_path.unlink()
+            except OSError:
+                pass
+
+        return {'success': True}
     finally:
         connection.close()

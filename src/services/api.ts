@@ -1,5 +1,10 @@
 import type {
   AuthBootstrapResponse,
+  AdminAuditResponse,
+  AdminBackupsResponse,
+  AdminFacesResponse,
+  AdminStatsResponse,
+  AdminUsersResponse,
   BackupMetaResponse,
   GeneratePdfResponse,
   PdfV2OptionsResponse,
@@ -443,5 +448,107 @@ export function backupDelete(authToken = '', deviceId?: string | number): Promis
 }> {
   return request('/v2/backup', 'DELETE', {
     headers: buildDeviceHeaders(authToken, deviceId)
+  })
+}
+
+
+// ============================================================
+// ADMIN
+// ============================================================
+
+export function adminStats(deviceId?: string | number): Promise<AdminStatsResponse> {
+  return request<AdminStatsResponse>('/v2/admin/stats', 'GET', {
+    headers: buildDeviceHeaders('', deviceId)
+  })
+}
+
+export function adminUsers(deviceId?: string | number): Promise<AdminUsersResponse> {
+  return request<AdminUsersResponse>('/v2/admin/users', 'GET', {
+    headers: buildDeviceHeaders('', deviceId)
+  })
+}
+
+export function adminSetUserAdmin(
+  userId: number,
+  isAdmin: boolean,
+  deviceId?: string | number
+): Promise<{ success: boolean; error?: string }> {
+  return request(`/v2/admin/users/${userId}/admin`, 'POST', {
+    headers: {
+      'Content-Type': 'application/json',
+      ...buildDeviceHeaders('', deviceId)
+    },
+    body: JSON.stringify({ isAdmin })
+  })
+}
+
+export function adminDeleteUser(
+  userId: number,
+  deviceId?: string | number
+): Promise<{ success: boolean; error?: string }> {
+  return request(`/v2/admin/users/${userId}`, 'DELETE', {
+    headers: buildDeviceHeaders('', deviceId)
+  })
+}
+
+export function adminBulkDeleteUsers(
+  userIds: number[],
+  deviceId?: string | number
+): Promise<{
+  success: boolean
+  deleted: number
+  skipped: Array<{ id: number; reason: string }>
+  error?: string
+}> {
+  return request('/v2/admin/users/bulk-delete', 'POST', {
+    headers: {
+      'Content-Type': 'application/json',
+      ...buildDeviceHeaders('', deviceId)
+    },
+    body: JSON.stringify({ userIds })
+  })
+}
+
+export function adminBackups(deviceId?: string | number): Promise<AdminBackupsResponse> {
+  return request<AdminBackupsResponse>('/v2/admin/backups', 'GET', {
+    headers: buildDeviceHeaders('', deviceId)
+  })
+}
+
+export function adminDeleteBackup(
+  backupId: number,
+  deviceId?: string | number
+): Promise<{ success: boolean; deleted?: boolean; error?: string }> {
+  return request(`/v2/admin/backups/${backupId}`, 'DELETE', {
+    headers: buildDeviceHeaders('', deviceId)
+  })
+}
+
+export function adminAudit(limit = 100, deviceId?: string | number): Promise<AdminAuditResponse> {
+  return request<AdminAuditResponse>(`/v2/admin/audit?limit=${limit}`, 'GET', {
+    headers: buildDeviceHeaders('', deviceId)
+  })
+}
+
+export function adminFaces(deviceId?: string | number): Promise<AdminFacesResponse> {
+  return request<AdminFacesResponse>('/v2/admin/faces', 'GET', {
+    headers: buildDeviceHeaders('', deviceId)
+  })
+}
+
+export function adminDeleteFace(
+  faceId: number,
+  deviceId?: string | number
+): Promise<{ success: boolean; error?: string }> {
+  return request(`/v2/admin/faces/${faceId}`, 'DELETE', {
+    headers: buildDeviceHeaders('', deviceId)
+  })
+}
+
+
+export function presencePing(deviceId?: string | number): Promise<{ success: boolean }> {
+  return request('/v2/presence/ping', 'POST', {
+    headers: buildDeviceHeaders('', deviceId),
+    timeoutMs: 8000
   })
 }

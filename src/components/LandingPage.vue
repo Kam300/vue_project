@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
+import { RouterLink } from 'vue-router'
 import AppIcon from '@/components/shared/AppIcon.vue'
 import { healthCheck, listFaces } from '@/services/api'
 import { APP_LOGO_COMPACT_URL } from '@/constants/branding'
@@ -436,9 +437,16 @@ const androidApkUrl = '/app-debug.apk'
             красивых PDF-документов.
           </p>
           <div class="hero-actions">
-            <a href="#features" class="btn btn-primary">Узнать подробнее</a>
-            <a href="#logs" class="btn btn-outline">Статус сервера</a>
+            <RouterLink to="/app/members" class="btn btn-primary btn-cta-pulse">
+              Начать работу
+              <span class="btn-arrow" aria-hidden="true">→</span>
+            </RouterLink>
+            <a href="#features" class="btn btn-outline">Узнать подробнее</a>
           </div>
+          <p class="hero-cta-hint">
+            Хранение в&nbsp;браузере, ничего не&nbsp;нужно регистрировать. Подключите Яндекс ID позже —
+            если захотите перенести данные между устройствами.
+          </p>
           <div class="hero-stats">
             <div class="stat">
               <span class="stat-value">ИИ</span>
@@ -579,14 +587,15 @@ const androidApkUrl = '/app-debug.apk'
       </div>
     </section>
 
-    <!-- API STATUS & LOGS -->
+    <!-- API STATUS (минимальный публичный) -->
     <section id="logs" class="section logs-section">
       <div class="container">
-        <h2 class="section-title animate-in">Сервер API</h2>
-        <p class="section-subtitle animate-in delay-1">Мониторинг сервера в реальном времени</p>
+        <h2 class="section-title animate-in">Состояние сервиса</h2>
+        <p class="section-subtitle animate-in delay-1">
+          Мини-проверка работоспособности. Подробный мониторинг доступен в&nbsp;админ-панели.
+        </p>
 
-        <div class="api-panel animate-in delay-2">
-          <!-- Status bar -->
+        <div class="api-panel api-panel-compact animate-in delay-2">
           <div class="api-status-bar">
             <div class="status-indicator" :class="apiStatus || 'loading'">
               <span class="status-dot"></span>
@@ -597,23 +606,9 @@ const androidApkUrl = '/app-debug.apk'
             </div>
             <div class="status-meta">
               <span v-if="apiLatency" class="latency">{{ apiLatency }}ms</span>
-              <span class="members-count">Лиц в базе: {{ memberCount }}</span>
             </div>
           </div>
 
-          <!-- Quick actions -->
-          <div class="api-actions">
-            <button class="action-btn" @click="checkHealth" :disabled="healthBusy">
-              <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path d="M4 2a1 1 0 011 1v2.1c1.5-1.6 3.5-2.6 5.8-2.6 4.4 0 8 3.6 8 8s-3.6 8-8 8-8-3.6-8-8a1 1 0 012 0c0 3.3 2.7 6 6 6s6-2.7 6-6-2.7-6-6-6c-1.8 0-3.4.8-4.5 2H8a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1z"/></svg>
-              Проверить сервер
-            </button>
-            <button class="action-btn" @click="testListFaces" :disabled="facesBusy">
-              <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path d="M9 6a3 3 0 110 6 3 3 0 010-6zm0-2a5 5 0 100 10A5 5 0 009 4zm8 12a1 1 0 01-2 0c0-2.8-2.2-4-5-4s-5 1.2-5 4a1 1 0 01-2 0c0-4.2 3.6-6 7-6s7 1.8 7 6z"/></svg>
-              Список лиц в базе
-            </button>
-          </div>
-
-          <!-- Capabilities -->
           <div class="api-caps">
             <div class="cap" :class="{ active: faceRecOk }">
               <span class="cap-dot"></span>
@@ -623,31 +618,9 @@ const androidApkUrl = '/app-debug.apk'
               <span class="cap-dot"></span>
               Генерация PDF
             </div>
-            <div class="cap info">
-              <span>Проверок: {{ checkCount }}</span>
-            </div>
-          </div>
-
-          <!-- Log feed -->
-          <div class="log-feed">
-            <div class="log-header">
-              <svg viewBox="0 0 20 20" fill="currentColor" width="14" height="14"><path fill-rule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h6a1 1 0 110 2H4a1 1 0 01-1-1z"/></svg>
-              Журнал событий
-              <span class="log-count">{{ logs.length }}</span>
-            </div>
-            <div class="log-entries" ref="logContainer">
-              <TransitionGroup name="log-item">
-                <div v-for="log in logs" :key="log.id" class="log-entry" :class="'log-' + log.type">
-                  <span class="log-time">{{ log.ts }}</span>
-                  <span class="log-icon">
-                    <AppIcon :name="normalizeLogIcon(log.icon)" :size="16" />
-                  </span>
-                  <span class="log-msg">{{ log.message }}</span>
-                </div>
-              </TransitionGroup>
-              <div v-if="logs.length === 0" class="log-empty">
-                Ожидание событий...
-              </div>
+            <div class="cap" :class="{ active: apiStatus === 'online' }">
+              <span class="cap-dot"></span>
+              Резервное копирование
             </div>
           </div>
         </div>
@@ -765,7 +738,40 @@ const androidApkUrl = '/app-debug.apk'
   color: var(--color-text-secondary);
   max-width: 520px; margin-bottom: 32px;
 }
-.hero-actions { display: flex; gap: 14px; margin-bottom: 48px; }
+.hero-actions { display: flex; gap: 14px; margin-bottom: 24px; }
+
+.hero-cta-hint {
+  font-size: 0.86rem;
+  line-height: 1.55;
+  color: var(--color-text-muted);
+  max-width: 480px;
+  margin: 0 0 32px;
+}
+
+.btn-arrow {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 1.05em;
+  transition: transform 0.25s ease;
+}
+
+.btn-cta-pulse {
+  position: relative;
+  animation: cta-pulse 2.4s ease-in-out infinite;
+}
+
+.btn-cta-pulse:hover .btn-arrow {
+  transform: translateX(4px);
+}
+
+@keyframes cta-pulse {
+  0%, 100% {
+    box-shadow: 0 4px 24px rgba(124, 92, 252, 0.25);
+  }
+  50% {
+    box-shadow: 0 6px 36px rgba(124, 92, 252, 0.55);
+  }
+}
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center;
@@ -1056,6 +1062,21 @@ const androidApkUrl = '/app-debug.apk'
   border-radius: var(--radius-xl);
   overflow: hidden;
   box-shadow: var(--shadow-card);
+}
+
+.api-panel-compact {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.api-panel-compact .api-status-bar {
+  border-bottom: none;
+  padding: 18px 24px;
+}
+
+.api-panel-compact .api-caps {
+  border-top: 1px solid var(--color-glass-border);
+  padding: 14px 24px;
 }
 .api-status-bar {
   display: flex; align-items: center; justify-content: space-between;

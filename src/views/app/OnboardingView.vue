@@ -65,12 +65,27 @@ const yandexConfigured = computed(() => Boolean(appStore.authProviders?.yandex?.
 const vkConfigured = computed(() => Boolean(appStore.authProviders?.vk?.configured))
 const hasPortableIdentity = computed(() => Boolean(appStore.portableIdentity))
 
+const consentBlockRef = ref<HTMLElement | null>(null)
+const consentShake = ref(false)
+
+function pulseConsent(): void {
+  consentShake.value = false
+  // restart animation
+  void consentBlockRef.value?.offsetWidth
+  consentShake.value = true
+  consentBlockRef.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  window.setTimeout(() => {
+    consentShake.value = false
+  }, 900)
+}
+
 async function nextPage(): Promise<void> {
   error.value = ''
   direction.value = 'next'
 
   if (page.value === 1 && !consent.value) {
     error.value = 'Для продолжения примите политику конфиденциальности.'
+    pulseConsent()
     return
   }
 
@@ -159,7 +174,11 @@ async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void>
         </Transition>
 
         <div v-if="page === 1" class="policy-block">
-          <label class="toggle-switch">
+          <label
+            ref="consentBlockRef"
+            class="toggle-switch consent-toggle"
+            :class="{ 'consent-shake': consentShake, 'consent-required': !consent }"
+          >
             <input v-model="consent" type="checkbox" />
             <span class="toggle-track"></span>
             <span>Я принимаю политику конфиденциальности</span>
@@ -179,44 +198,55 @@ async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void>
             </p>
           </div>
 
-          <div class="backup-auth-block">
+          <div class="backup-auth-block" :class="{ 'is-connected': hasPortableIdentity }">
             <div class="backup-auth-head">
               <AppIcon :name="hasPortableIdentity ? 'verified_user' : 'cloud'" :size="18" />
-              <span>Перенос между устройствами</span>
+              <span>{{ hasPortableIdentity ? 'Учётная запись подключена' : 'Перенос между устройствами' }}</span>
             </div>
 
-            <p class="backup-auth-text">
-              Этот шаг необязателен. Можно подключить внешний вход сейчас или сделать это позже в разделе
-              «Резервные копии».
-            </p>
+            <template v-if="hasPortableIdentity">
+              <p class="backup-auth-text">
+                Backup можно переносить между устройствами. Если хотите сменить аккаунт —
+                сначала отключите текущий в&nbsp;разделе «Резервные копии».
+              </p>
+              <p class="backup-auth-status ok">
+                {{ appStore.portableIdentity?.provider === 'yandex' ? 'Яндекс ID' : 'VK ID' }} ·
+                {{ appStore.portableIdentity?.displayName || appStore.authUser?.displayName }}
+              </p>
+            </template>
 
-            <div class="btn-row backup-auth-actions">
-              <YandexIdButton
-                @click="connectPortableIdentity('yandex')"
-                :disabled="authBusy !== '' || !yandexConfigured"
-                :loading="authBusy === 'yandex'"
+            <template v-else>
+              <p class="backup-auth-text">
+                Этот шаг необязателен. Можно подключить внешний вход сейчас или сделать это позже в&nbsp;разделе
+                «Резервные копии».
+              </p>
+
+              <div class="btn-row backup-auth-actions">
+                <YandexIdButton
+                  @click="connectPortableIdentity('yandex')"
+                  :disabled="authBusy !== '' || !yandexConfigured"
+                  :loading="authBusy === 'yandex'"
+                />
+                <button
+                  class="btn-action"
+                  @click="connectPortableIdentity('vk')"
+                  :disabled="authBusy !== '' || !vkConfigured"
+                >
+                  {{ authBusy === 'vk' ? 'Подключение…' : 'Войти с VK ID' }}
+                </button>
+              </div>
+
+              <SyncProgress
+                :visible="Boolean(authBusy)"
+                :progress="authProgress"
+                :label="authProgressLabel"
               />
-              <button
-                class="btn-action"
-                @click="connectPortableIdentity('vk')"
-                :disabled="authBusy !== '' || !vkConfigured"
-              >
-                {{ authBusy === 'vk' ? 'Подключение…' : 'Войти с VK ID' }}
-              </button>
-            </div>
 
-            <SyncProgress
-              :visible="Boolean(authBusy)"
-              :progress="authProgress"
-              :label="authProgressLabel"
-            />
+              <p class="backup-auth-status muted">
+                Можно пропустить этот шаг и подключить вход позже.
+              </p>
+            </template>
 
-            <p v-if="hasPortableIdentity" class="backup-auth-status ok">
-              Переносимая учётная запись уже подключена.
-            </p>
-            <p v-else class="backup-auth-status muted">
-              Можно пропустить этот шаг и подключить вход позже.
-            </p>
             <p v-if="authStatus" class="backup-auth-status ok">{{ authStatus }}</p>
             <p v-if="authError" class="backup-auth-status err">{{ authError }}</p>
           </div>
@@ -402,6 +432,16 @@ async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void>
   display: flex;
   flex-direction: column;
   gap: 10px;
+  transition: border-color 0.25s ease, background 0.25s ease;
+}
+
+.backup-auth-block.is-connected {
+  border-color: rgba(52, 211, 153, 0.4);
+  background: linear-gradient(
+    135deg,
+    var(--color-surface),
+    rgba(52, 211, 153, 0.08)
+  );
 }
 
 .backup-auth-head {
@@ -506,5 +546,41 @@ async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void>
   .onboarding-card {
     padding: 24px 16px;
   }
+}
+
+/* === Consent toggle highlight === */
+.consent-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid transparent;
+  transition: background 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+.consent-toggle.consent-required {
+  border-color: rgba(124, 92, 252, 0.45);
+  background: rgba(124, 92, 252, 0.08);
+  animation: consent-glow 1.8s ease-in-out infinite;
+}
+
+.consent-toggle.consent-shake {
+  animation: consent-shake 0.55s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+  border-color: rgba(248, 113, 113, 0.7) !important;
+  background: rgba(248, 113, 113, 0.12) !important;
+  box-shadow: 0 0 0 4px rgba(248, 113, 113, 0.15);
+}
+
+@keyframes consent-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 92, 252, 0.0); }
+  50%      { box-shadow: 0 0 0 6px rgba(124, 92, 252, 0.18); }
+}
+
+@keyframes consent-shake {
+  10%, 90% { transform: translateX(-3px); }
+  20%, 80% { transform: translateX(5px); }
+  30%, 50%, 70% { transform: translateX(-8px); }
+  40%, 60% { transform: translateX(8px); }
 }
 </style>

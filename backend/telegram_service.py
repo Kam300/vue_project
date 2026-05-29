@@ -210,7 +210,11 @@ CORS(app, resources={r'/*': {'origins': CORS_ORIGINS}})
 try:
     from sql_api_v2 import register_sql_api_v2
 
-    register_sql_api_v2(app, base_dir=BASE_DIR, logger=logger)
+    register_sql_api_v2(
+        app,
+        base_dir=BASE_DIR,
+        logger=logger,
+    )
 except Exception as exc:
     logger.warning("SQL API v2 routes are unavailable: %s", exc)
 
@@ -1904,19 +1908,41 @@ def register_face():
             face_encoding=face_encodings[0]
         )
         if duplicate is not None:
-            logger.info(
-                "Дубликат регистрации лица отклонен: requested_id=%s, existing_id=%s, reason=%s",
-                member_id,
-                duplicate['member_id'],
-                duplicate['reason']
-            )
-            return make_response_json({
-                'success': True,
-                'message': f"Лицо уже зарегистрировано (ID: {duplicate['member_id']})",
-                'member_id': duplicate['member_id'],
-                'duplicate': True,
-                'duplicate_reason': duplicate['reason']
-            })
+            old_id = duplicate['member_id']
+            # Если дубликат найден под ДРУГИМ member_id — перерегистрируем под новым
+            if str(old_id) != str(member_id):
+                logger.info(
+                    "Перерегистрация лица: old_id=%s -> new_id=%s (reason=%s)",
+                    old_id, member_id, duplicate['reason']
+                )
+                # Удаляем старую запись
+                face_encodings_db.pop(old_id, None)
+                old_photo = os.path.join(REFERENCE_PHOTOS_DIR, f"{old_id}.jpg")
+                if os.path.exists(old_photo):
+                    try:
+                        os.remove(old_photo)
+                    except OSError:
+                        pass
+                # Продолжаем регистрацию под новым member_id (не return)
+            else:
+                # Тот же member_id — реальный дубликат, обновляем кодировку
+                face_encodings_db[member_id] = {
+                    'name': member_name,
+                    'encoding': face_encodings[0],
+                    'image_hash': image_hash
+                }
+                save_encodings()
+                logger.info(
+                    "Обновлена кодировка для %s (ID: %s)",
+                    member_name, member_id
+                )
+                return make_response_json({
+                    'success': True,
+                    'message': f"Кодировка обновлена для {member_name}",
+                    'member_id': member_id,
+                    'duplicate': True,
+                    'duplicate_reason': duplicate['reason']
+                })
 
         # Сохраняем кодировку
         face_encodings_db[member_id] = {

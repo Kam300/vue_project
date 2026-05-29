@@ -55,7 +55,14 @@ const router = createRouter({
         {
           path: 'server',
           name: 'server',
-          component: () => import('@/views/app/ServerPanelView.vue')
+          component: () => import('@/views/app/ServerPanelView.vue'),
+          meta: { requiresAdmin: true }
+        },
+        {
+          path: 'admin',
+          name: 'admin',
+          component: () => import('@/views/app/AdminPanelView.vue'),
+          meta: { requiresAdmin: true }
         },
         {
           path: 'settings',
@@ -107,6 +114,10 @@ router.beforeEach(async (to) => {
   }
 
   if (!appStore.requiresLock && to.path === lockRoute) {
+    return '/app/members'
+  }
+
+  if (to.meta?.requiresAdmin && !appStore.isAdmin) {
     return '/app/members'
   }
 

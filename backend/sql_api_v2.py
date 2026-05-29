@@ -14,12 +14,22 @@ from flask import Response, redirect, request, send_file, session
 from sql_repository import (
     attach_yandex_identity,
     delete_backup,
+    delete_backup_admin,
+    delete_face_encoding_admin,
+    delete_user_admin,
     ensure_local_user,
+    get_admin_stats,
     get_auth_snapshot,
     get_backup_meta,
     get_user_id_for_request,
+    is_user_admin,
+    list_all_backups_admin,
+    list_audit_logs_admin,
+    list_face_encodings_admin,
+    list_users_admin,
     load_backup_path,
     resolve_user_snapshot,
+    set_user_admin,
     store_backup,
 )
 
@@ -86,7 +96,7 @@ def _bootstrap_snapshot(db_path: Path) -> dict[str, Any]:
         device_id=device_id,
         session_user_id=int(session_user_id) if session_user_id else None,
         display_name=display_name,
-        allow_create=bool(device_id),
+        allow_create=False,
     )
     if snapshot is None:
         return {
@@ -211,8 +221,10 @@ def _yandex_redirect_uri(mobile: bool) -> str:
 def _exchange_yandex_code(code: str, redirect_uri: str) -> dict[str, Any]:
     client_id = str(os.environ.get('YANDEX_CLIENT_ID') or '').strip()
     client_secret = str(os.environ.get('YANDEX_CLIENT_SECRET') or '').strip()
-    token_response = requests.post(
-        'https://oauth.yandex.ru/token',
+
+    token_payload = _yandex_request_with_retry(
+        method='POST',
+        url='https://oauth.yandex.ru/token',
         data={
             'grant_type': 'authorization_code',
             'code': code,
@@ -222,23 +234,72 @@ def _exchange_yandex_code(code: str, redirect_uri: str) -> dict[str, Any]:
         },
         timeout=30,
     )
-    token_response.raise_for_status()
-    token_payload = token_response.json()
     access_token = str(token_payload.get('access_token') or '').strip()
     if not access_token:
         raise ValueError('Yandex token response does not contain access_token')
 
-    profile_response = requests.get(
-        'https://login.yandex.ru/info',
+    return _yandex_request_with_retry(
+        method='GET',
+        url='https://login.yandex.ru/info',
         params={'format': 'json'},
         headers={'Authorization': f'OAuth {access_token}'},
         timeout=30,
     )
-    profile_response.raise_for_status()
-    return profile_response.json()
 
 
-def register_sql_api_v2(app, *, base_dir: Path, logger=None) -> None:
+def _yandex_request_with_retry(
+    *,
+    method: str,
+    url: str,
+    data: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = 30,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    """
+    Выполняет запрос к Yandex OAuth/login API с ретраем по сетевым ошибкам
+    (SSLError, ConnectionError, Timeout). Возвращает распарсенный JSON.
+    """
+    import time
+    from requests.exceptions import (
+        ConnectionError as RequestsConnectionError,
+        SSLError,
+        Timeout,
+    )
+
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if method == 'POST':
+                response = requests.post(url, data=data, headers=headers, timeout=timeout)
+            else:
+                response = requests.get(url, params=params, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            return response.json()
+        except (SSLError, RequestsConnectionError, Timeout) as exc:
+            last_error = exc
+            if attempt >= max_attempts:
+                break
+            time.sleep(0.6 * attempt)  # 0.6s, 1.2s, ...
+
+    raise ConnectionError(
+        'Не удалось связаться с серверами Yandex (SSL / сеть оборвана). '
+        'Попробуйте ещё раз через минуту, отключите VPN/прокси/антивирус, '
+        'либо проверьте подключение к интернету. '
+        f'Подробнее: {last_error}'
+    )
+
+
+def register_sql_api_v2(
+    app,
+    *,
+    base_dir: Path,
+    logger=None,
+    face_encodings_db: dict | None = None,
+    save_encodings_fn=None,
+    reference_photos_dir: str | None = None,
+) -> None:
     db_path = base_dir / 'familyone.db'
     app.secret_key = str(os.environ.get('SESSION_SECRET_KEY') or secrets.token_hex(32))
     app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
@@ -252,6 +313,65 @@ def register_sql_api_v2(app, *, base_dir: Path, logger=None) -> None:
     if logger:
         logger.info('SQL v2 API enabled, database=%s', db_path)
 
+    # ============================================================
+    # PRESENCE TRACKER (in-memory)
+    # ============================================================
+    import threading
+    import time as _time
+
+    presence: dict[str, dict[str, Any]] = {}
+    presence_lock = threading.Lock()
+    PRESENCE_WINDOW_SEC = 90  # сколько секунд считаем юзера "онлайн" после последнего ping
+
+    def _presence_touch(client_key: str, user_id: int | None) -> None:
+        now = _time.time()
+        with presence_lock:
+            presence[client_key] = {
+                'last_seen': now,
+                'user_id': user_id,
+            }
+            # cleanup
+            cutoff = now - PRESENCE_WINDOW_SEC
+            stale = [k for k, v in presence.items() if v['last_seen'] < cutoff]
+            for k in stale:
+                presence.pop(k, None)
+
+    def _presence_snapshot() -> dict[str, Any]:
+        now = _time.time()
+        cutoff = now - PRESENCE_WINDOW_SEC
+        with presence_lock:
+            active = [v for v in presence.values() if v['last_seen'] >= cutoff]
+        authorized = sum(1 for v in active if v['user_id'])
+        anonymous = len(active) - authorized
+        return {
+            'total': len(active),
+            'authorized': authorized,
+            'anonymous': anonymous,
+            'window_seconds': PRESENCE_WINDOW_SEC,
+        }
+
+    @app.post('/api/v2/presence/ping')
+    @app.post('/v2/presence/ping')
+    def presence_ping():
+        device_id = _request_device_id()
+        # client key: device_id если есть, иначе IP
+        client_key = device_id or (request.remote_addr or 'anonymous')
+        user_id = None
+        if device_id:
+            try:
+                user_id = get_user_id_for_request(
+                    db_path,
+                    device_id=device_id,
+                    session_user_id=int(session.get('familyone_user_id'))
+                    if session.get('familyone_user_id')
+                    else None,
+                    allow_create=False,
+                )
+            except Exception:
+                user_id = None
+        _presence_touch(client_key, user_id)
+        return _json_response({'success': True})
+
     @app.get('/api/v2/auth/providers')
     @app.get('/v2/auth/providers')
     def auth_providers():
@@ -260,9 +380,8 @@ def register_sql_api_v2(app, *, base_dir: Path, logger=None) -> None:
     @app.post('/api/v2/auth/bootstrap')
     @app.post('/v2/auth/bootstrap')
     def auth_bootstrap():
-        device_id = _request_device_id()
-        if device_id:
-            ensure_local_user(db_path, device_id, _request_display_name('Веб-клиент Семейного древа'))
+        # Не создаём гостевого пользователя на каждый заход.
+        # Запись появится только при Яндекс-логине или загрузке бэкапа.
         return _json_response(_bootstrap_snapshot(db_path))
 
     @app.get('/api/v2/auth/me')
@@ -479,4 +598,220 @@ def register_sql_api_v2(app, *, base_dir: Path, logger=None) -> None:
         except Exception as error_obj:
             if logger:
                 logger.exception('backup delete failed')
+            return _json_response({'success': False, 'error': str(error_obj)}, 500)
+
+    # ============================================================
+    # ADMIN ROUTES
+    # ============================================================
+    def _require_admin() -> tuple[int | None, Response | None]:
+        user_id = _resolve_backup_user_id()
+        if not user_id:
+            return None, _json_response({'success': False, 'error': 'Auth is required'}, 401)
+        if not is_user_admin(db_path, user_id):
+            return None, _json_response({'success': False, 'error': 'Admin access required'}, 403)
+        return user_id, None
+
+    @app.get('/api/v2/admin/stats')
+    @app.get('/v2/admin/stats')
+    def admin_stats():
+        _, error_response = _require_admin()
+        if error_response is not None:
+            return error_response
+        try:
+            stats_data = get_admin_stats(db_path, base_dir)
+            stats_data['presence'] = _presence_snapshot()
+            return _json_response({'success': True, **stats_data})
+        except Exception as error_obj:
+            if logger:
+                logger.exception('admin stats failed')
+            return _json_response({'success': False, 'error': str(error_obj)}, 500)
+
+    @app.get('/api/v2/admin/users')
+    @app.get('/v2/admin/users')
+    def admin_users_list():
+        _, error_response = _require_admin()
+        if error_response is not None:
+            return error_response
+        try:
+            users = list_users_admin(db_path)
+            return _json_response({'success': True, 'users': users})
+        except Exception as error_obj:
+            if logger:
+                logger.exception('admin users list failed')
+            return _json_response({'success': False, 'error': str(error_obj)}, 500)
+
+    @app.post('/api/v2/admin/users/<int:target_user_id>/admin')
+    @app.post('/v2/admin/users/<int:target_user_id>/admin')
+    def admin_users_set_admin(target_user_id):
+        admin_id, error_response = _require_admin()
+        if error_response is not None:
+            return error_response
+        payload = request.get_json(silent=True) or {}
+        is_admin = bool(payload.get('isAdmin', False))
+        if not is_admin and target_user_id == admin_id:
+            return _json_response(
+                {'success': False, 'error': 'Cannot revoke your own admin rights'}, 400
+            )
+        try:
+            set_user_admin(db_path, target_user_id, is_admin)
+            return _json_response({'success': True})
+        except Exception as error_obj:
+            if logger:
+                logger.exception('admin set_admin failed')
+            return _json_response({'success': False, 'error': str(error_obj)}, 500)
+
+    @app.delete('/api/v2/admin/users/<int:target_user_id>')
+    @app.delete('/v2/admin/users/<int:target_user_id>')
+    def admin_users_delete(target_user_id):
+        admin_id, error_response = _require_admin()
+        if error_response is not None:
+            return error_response
+        if target_user_id == admin_id:
+            return _json_response(
+                {'success': False, 'error': 'Cannot delete your own account'}, 400
+            )
+        try:
+            result = delete_user_admin(db_path, base_dir, target_user_id)
+            status = 200 if result.get('success') else 400
+            return _json_response(result, status)
+        except Exception as error_obj:
+            if logger:
+                logger.exception('admin user delete failed')
+            return _json_response({'success': False, 'error': str(error_obj)}, 500)
+
+    @app.post('/api/v2/admin/users/bulk-delete')
+    @app.post('/v2/admin/users/bulk-delete')
+    def admin_users_bulk_delete():
+        admin_id, error_response = _require_admin()
+        if error_response is not None:
+            return error_response
+        payload = request.get_json(silent=True) or {}
+        ids = payload.get('userIds') or payload.get('user_ids') or []
+        if not isinstance(ids, list):
+            return _json_response({'success': False, 'error': 'userIds must be an array'}, 400)
+        try:
+            from sql_repository import bulk_delete_users_admin
+            result = bulk_delete_users_admin(db_path, base_dir, ids, admin_id)
+            return _json_response(result)
+        except Exception as error_obj:
+            if logger:
+                logger.exception('admin bulk delete failed')
+            return _json_response({'success': False, 'error': str(error_obj)}, 500)
+
+    @app.get('/api/v2/admin/backups')
+    @app.get('/v2/admin/backups')
+    def admin_backups_list():
+        _, error_response = _require_admin()
+        if error_response is not None:
+            return error_response
+        try:
+            backups = list_all_backups_admin(db_path, base_dir)
+            return _json_response({'success': True, 'backups': backups})
+        except Exception as error_obj:
+            if logger:
+                logger.exception('admin backups list failed')
+            return _json_response({'success': False, 'error': str(error_obj)}, 500)
+
+    @app.delete('/api/v2/admin/backups/<int:backup_id>')
+    @app.delete('/v2/admin/backups/<int:backup_id>')
+    def admin_backups_delete(backup_id):
+        _, error_response = _require_admin()
+        if error_response is not None:
+            return error_response
+        try:
+            result = delete_backup_admin(db_path, base_dir, backup_id)
+            status = 200 if result.get('success') else 404
+            return _json_response(result, status)
+        except Exception as error_obj:
+            if logger:
+                logger.exception('admin backup delete failed')
+            return _json_response({'success': False, 'error': str(error_obj)}, 500)
+
+    @app.get('/api/v2/admin/audit')
+    @app.get('/v2/admin/audit')
+    def admin_audit_list():
+        _, error_response = _require_admin()
+        if error_response is not None:
+            return error_response
+        try:
+            limit = int(request.args.get('limit', 100))
+        except ValueError:
+            limit = 100
+        try:
+            logs_data = list_audit_logs_admin(db_path, limit=limit)
+            return _json_response({'success': True, 'logs': logs_data})
+        except Exception as error_obj:
+            if logger:
+                logger.exception('admin audit list failed')
+            return _json_response({'success': False, 'error': str(error_obj)}, 500)
+
+    @app.get('/api/v2/admin/faces')
+    @app.get('/v2/admin/faces')
+    def admin_faces_list():
+        _, error_response = _require_admin()
+        if error_response is not None:
+            return error_response
+        try:
+            # Читаем face_encodings_db из telegram_service (in-memory, актуальные данные)
+            import sys
+            ts = sys.modules.get('telegram_service') or sys.modules.get('__main__')
+            face_db = getattr(ts, 'face_encodings_db', None) if ts else None
+            ref_dir = getattr(ts, 'REFERENCE_PHOTOS_DIR', None) if ts else None
+
+            if face_db and isinstance(face_db, dict):
+                encodings = []
+                for idx, (member_id, info) in enumerate(face_db.items()):
+                    ref_photo_path = None
+                    if ref_dir:
+                        candidate = os.path.join(ref_dir, f"{member_id}.jpg")
+                        if os.path.exists(candidate):
+                            ref_photo_path = candidate
+                    encodings.append({
+                        'id': idx + 1,
+                        'personId': 0,
+                        'personName': info.get('name', ''),
+                        'externalMemberId': str(member_id),
+                        'modelVersion': 'face-recognition',
+                        'isActive': True,
+                        'referencePhotoPath': ref_photo_path,
+                        'createdAt': None,
+                    })
+                return _json_response({
+                    'success': True,
+                    'count': len(encodings),
+                    'encodings': encodings,
+                })
+            return _json_response({'success': True, **list_face_encodings_admin(db_path)})
+        except Exception as error_obj:
+            if logger:
+                logger.exception('admin faces list failed')
+            return _json_response({'success': False, 'error': str(error_obj)}, 500)
+
+    @app.delete('/api/v2/admin/faces/<int:face_id>')
+    @app.delete('/v2/admin/faces/<int:face_id>')
+    def admin_face_delete(face_id):
+        _, error_response = _require_admin()
+        if error_response is not None:
+            return error_response
+        try:
+            if face_encodings_db is not None:
+                member_ids = list(face_encodings_db.keys())
+                idx = face_id - 1
+                if 0 <= idx < len(member_ids):
+                    member_id = member_ids[idx]
+                    del face_encodings_db[member_id]
+                    if reference_photos_dir:
+                        photo_path = os.path.join(reference_photos_dir, f"{member_id}.jpg")
+                        if os.path.exists(photo_path):
+                            os.remove(photo_path)
+                    if save_encodings_fn:
+                        save_encodings_fn()
+                    return _json_response({'success': True, 'message': f'Face {member_id} deleted'})
+                return _json_response({'success': False, 'error': 'Face not found'}, 404)
+            result = delete_face_encoding_admin(db_path, face_id)
+            status = 200 if result.get('success') else 404
+            return _json_response(result, status)
+        except Exception as error_obj:
+            if logger:
+                logger.exception('admin face delete failed')
             return _json_response({'success': False, 'error': str(error_obj)}, 500)
