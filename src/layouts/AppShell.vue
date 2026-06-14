@@ -16,6 +16,7 @@ import {
   start as startOfflineDetector,
   stop as stopOfflineDetector
 } from '@/services/offlineDetector'
+import { authLogout } from '@/services/api'
 import { APP_LOGO_COMPACT_URL } from '@/constants/branding'
 
 const appStore = useAppStore()
@@ -24,6 +25,8 @@ const route = useRoute()
 const logoIcon = APP_LOGO_COMPACT_URL
 const mobileMenuOpen = ref(false)
 const themeAnimating = ref(false)
+let idleLogoutTimer: ReturnType<typeof window.setTimeout> | null = null
+const idleActivityEvents = ['pointerdown', 'keydown', 'touchstart', 'scroll'] as const
 
 const themes = ['system', 'light', 'dark'] as const
 type Theme = typeof themes[number]
@@ -86,6 +89,46 @@ function closeMobileMenu(): void {
   mobileMenuOpen.value = false
 }
 
+function clearIdleLogoutTimer(): void {
+  if (idleLogoutTimer !== null) {
+    window.clearTimeout(idleLogoutTimer)
+    idleLogoutTimer = null
+  }
+}
+
+function getIdleLogoutDelayMs(): number {
+  const minutes = Number(appStore.settings.idleLogoutMinutes || 0)
+  if (!Number.isFinite(minutes) || minutes <= 0) return 0
+  return Math.max(1, minutes) * 60_000
+}
+
+async function logoutForInactivity(): Promise<void> {
+  clearIdleLogoutTimer()
+  if (!appStore.authUser) return
+  await authLogout().catch(() => {})
+  appStore.clearLocalAuth()
+  appStore.lockSession()
+  closeMobileMenu()
+  if (route.path.startsWith('/app')) {
+    await router.push('/')
+  }
+}
+
+function scheduleIdleLogout(): void {
+  clearIdleLogoutTimer()
+  const delayMs = getIdleLogoutDelayMs()
+  if (!delayMs || !appStore.authUser) return
+  idleLogoutTimer = window.setTimeout(() => {
+    void logoutForInactivity()
+  }, delayMs)
+}
+
+function markUserActivity(): void {
+  if (!appStore.authUser) return
+  if (getIdleLogoutDelayMs() <= 0) return
+  scheduleIdleLogout()
+}
+
 watch(
   () => route.fullPath,
   () => {
@@ -93,12 +136,27 @@ watch(
   }
 )
 
+watch(
+  () => [appStore.authUser?.id ?? null, appStore.settings.idleLogoutMinutes],
+  () => {
+    scheduleIdleLogout()
+  },
+  { immediate: true }
+)
+
 onMounted(() => {
   startOfflineDetector()
   void startSyncTicker()
+  idleActivityEvents.forEach((eventName) => {
+    window.addEventListener(eventName, markUserActivity, { passive: true })
+  })
 })
 
 onBeforeUnmount(() => {
+  clearIdleLogoutTimer()
+  idleActivityEvents.forEach((eventName) => {
+    window.removeEventListener(eventName, markUserActivity)
+  })
   stopSyncTicker()
   stopOfflineDetector()
 })

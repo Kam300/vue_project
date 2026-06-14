@@ -11,13 +11,12 @@ import {
   generatePdf,
   generatePdfV2,
   generatePdfV3,
-  buildPdfDownloadUrl,
   fetchPdfV2Options
 } from '@/services/api'
 import type { PdfV2Options, PdfV2BackgroundConfig } from '@/types/api'
 import type { PdfV3Node, PdfV3Edge } from '@/services/api'
 import { exportMembersToCsv, exportMembersToJson, importMembersFromJsonText } from '@/services/memberData'
-import { downloadBlob, downloadText, openLinkInNewTab } from '@/utils/download'
+import { downloadBlob, downloadText } from '@/utils/download'
 
 const memberStore = useMemberStore()
 const importInput = ref<HTMLInputElement | null>(null)
@@ -32,7 +31,7 @@ const error = ref('')
 
 const pdfSettings = reactive({
   format: 'A4_LANDSCAPE',
-  use_drive: true,
+  use_drive: false,
   show_photos: true,
   show_dates: true,
   show_patronymic: true,
@@ -315,7 +314,7 @@ async function exportPdfFile(): Promise<void> {
               theme: pdfV2.theme,
               font_family: pdfV2.font_family,
               background: bg,
-              use_drive: pdfSettings.use_drive,
+              use_drive: false,
               defaults: canvasState.value.defaults || {}
             })
           })()
@@ -323,7 +322,7 @@ async function exportPdfFile(): Promise<void> {
         ? await generatePdfV2({
             members: membersForPdf,
             page_format: pdfSettings.format,
-            use_drive: pdfSettings.use_drive,
+            use_drive: false,
             theme: pdfV2.theme,
             card_style: pdfV2.card_style,
             layout: pdfV2.layout,
@@ -332,7 +331,7 @@ async function exportPdfFile(): Promise<void> {
         : await generatePdf({
             members: membersForPdf,
             format: pdfSettings.format,
-            use_drive: pdfSettings.use_drive,
+            use_drive: false,
             show_photos: pdfSettings.show_photos,
             show_dates: pdfSettings.show_dates,
             show_patronymic: pdfSettings.show_patronymic,
@@ -342,14 +341,6 @@ async function exportPdfFile(): Promise<void> {
 
     if (!response.success) {
       throw new Error(response.error || 'PDF генерация завершилась с ошибкой')
-    }
-
-    if (response.storage === 'google_drive' && response.drive_id) {
-      const url = buildPdfDownloadUrl(response.drive_id)
-      openLinkInNewTab(url)
-      status.value = 'PDF сгенерирован на сервере. Открыта ссылка на скачивание.'
-      await addBackupAudit('local_export', `pdf:drive:${response.drive_id}`)
-      return
     }
 
     if (!response.pdf_base64) {
@@ -577,11 +568,6 @@ async function onDrop(e: DragEvent): Promise<void> {
           </div>
 
           <div class="toggle-row">
-            <label class="toggle-switch">
-              <input v-model="pdfSettings.use_drive" type="checkbox" />
-              <span class="toggle-track"></span>
-              <span>Google Drive</span>
-            </label>
             <label class="toggle-switch">
               <input v-model="pdfSettings.show_photos" type="checkbox" />
               <span class="toggle-track"></span>

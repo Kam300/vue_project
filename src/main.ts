@@ -6,7 +6,7 @@ import router from './router'
 import './assets/main.css'
 import './assets/app.css'
 
-const CACHE_RESET_VERSION = '2026-04-03-restore-portable-auth-sync-1'
+const CACHE_RESET_VERSION = '2026-06-10-home-theme-and-about-links-1'
 const CACHE_RESET_KEY = 'familyone_cache_reset_version'
 const BROWSER_PROBE_KEY = 'familyone_browser_support_probe'
 const INDEXED_DB_PROBE_NAME = 'familyone_browser_probe_db'

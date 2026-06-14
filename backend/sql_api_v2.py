@@ -533,11 +533,9 @@ def register_sql_api_v2(
         with presence_lock:
             active = [v for v in presence.values() if v['last_seen'] >= cutoff]
         authorized = sum(1 for v in active if v['user_id'])
-        anonymous = len(active) - authorized
         return {
-            'total': len(active),
+            'total': authorized,
             'authorized': authorized,
-            'anonymous': anonymous,
             'window_seconds': PRESENCE_WINDOW_SEC,
         }
 
@@ -547,8 +545,7 @@ def register_sql_api_v2(
     @app.post('/v2/presence/ping')
     def presence_ping():
         device_id = _request_device_id()
-        # client key: device_id если есть, иначе IP
-        client_key = device_id or (request.remote_addr or 'anonymous')
+        client_key = device_id
         user_id = None
         if device_id:
             try:
@@ -562,6 +559,8 @@ def register_sql_api_v2(
                 )
             except Exception:
                 user_id = None
+        if not user_id:
+            return _json_response({'success': True})
         _presence_touch(client_key, user_id)
         return _json_response({'success': True})
 
@@ -595,7 +594,12 @@ def register_sql_api_v2(
         # must be set by the middleware before this route runs.
         user_id = getattr(g, 'user_id', None)
         session_id = getattr(g, 'session_id', None)
-        if not user_id or not session_id:
+        if not user_id:
+            session_user_id = session.get('familyone_user_id')
+            if session_user_id:
+                user_id = int(session_user_id)
+                session_id = 0
+        if not user_id:
             return _json_response({'success': False, 'error': 'unauthorized'}, 401)
 
         payload = request.get_json(silent=True) or {}
@@ -610,6 +614,17 @@ def register_sql_api_v2(
         conn = db_connect(db_path)
         try:
             conn.execute('BEGIN IMMEDIATE')
+            if not session_id:
+                session_device_id = str(session.get('familyone_device_id') or _request_device_id()).strip()
+                if session_device_id:
+                    current_session = conn.execute(
+                        'SELECT id FROM auth_sessions '
+                        'WHERE user_id = ? AND device_id = ? AND revoked_at IS NULL '
+                        'AND expires_at > ? ORDER BY id DESC LIMIT 1',
+                        (user_id, session_device_id, utcnow_sql()),
+                    ).fetchone()
+                    if current_session:
+                        session_id = int(current_session['id'])
             conn.execute(
                 'UPDATE users SET single_session_enabled = ? WHERE id = ?',
                 (1 if new_value else 0, user_id),

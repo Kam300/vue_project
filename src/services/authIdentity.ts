@@ -7,6 +7,50 @@ interface PopupAuthPayload {
   provider?: PortableProvider
   status?: 'success' | 'error'
   message?: string
+  sessionToken?: string
+}
+
+const AUTH_SESSION_TOKEN_KEY = 'familyone_auth_session_token'
+
+function getSessionStorage(): Storage | null {
+  if (typeof window === 'undefined') return null
+  try {
+    return window.sessionStorage
+  } catch {
+    return null
+  }
+}
+
+export function getAuthSessionToken(): string {
+  const storage = getSessionStorage()
+  if (!storage) return ''
+  try {
+    return storage.getItem(AUTH_SESSION_TOKEN_KEY) || ''
+  } catch {
+    return ''
+  }
+}
+
+export function clearAuthSessionToken(): void {
+  const storage = getSessionStorage()
+  if (!storage) return
+  try {
+    storage.removeItem(AUTH_SESSION_TOKEN_KEY)
+  } catch {
+    // ignore storage cleanup failures
+  }
+}
+
+function saveAuthSessionToken(token: string | undefined): void {
+  const normalized = String(token || '').trim()
+  if (!normalized) return
+  const storage = getSessionStorage()
+  if (!storage) return
+  try {
+    storage.setItem(AUTH_SESSION_TOKEN_KEY, normalized)
+  } catch {
+    // ignore storage write failures
+  }
 }
 
 function openProviderPopup(url: string, provider: PortableProvider): Promise<string> {
@@ -44,6 +88,7 @@ function openProviderPopup(url: string, provider: PortableProvider): Promise<str
 
       finish(() => {
         if (payload.status === 'success') {
+          saveAuthSessionToken(payload.sessionToken)
           resolve(payload.message || 'Авторизация завершена')
           return
         }

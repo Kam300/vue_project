@@ -78,6 +78,7 @@ export interface AppSettingsState {
   theme: 'system' | 'light' | 'dark'
   deviceId: number
   appLockBySession: boolean
+  idleLogoutMinutes: number
 }
 
 export interface SelectOption<T> {

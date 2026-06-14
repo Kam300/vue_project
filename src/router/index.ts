@@ -105,7 +105,13 @@ router.beforeEach(async (to) => {
     return '/app/onboarding'
   }
 
-  if (!appStore.requiresOnboarding && onboardingRoutes.has(to.path)) {
+  const requiresExternalIdentity = !appStore.portableIdentity
+
+  if (!appStore.requiresOnboarding && requiresExternalIdentity && !onboardingRoutes.has(to.path)) {
+    return '/app/onboarding'
+  }
+
+  if (!appStore.requiresOnboarding && !requiresExternalIdentity && onboardingRoutes.has(to.path)) {
     return '/app/members'
   }
 

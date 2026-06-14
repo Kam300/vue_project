@@ -6,6 +6,7 @@ import AppIcon from '@/components/shared/AppIcon.vue'
 import { useAppStore } from '@/stores/appStore'
 import { useMemberStore } from '@/stores/memberStore'
 import { authSettingsPatch, clearAllFaces } from '@/services/api'
+import { getAuthSessionToken } from '@/services/authIdentity'
 
 const appStore = useAppStore()
 const memberStore = useMemberStore()
@@ -16,6 +17,7 @@ const form = reactive({
   theme: 'system' as 'system' | 'light' | 'dark',
   treeTemplate: 'modern' as 'modern' | 'classic' | 'print',
   appLockBySession: false,
+  idleLogoutMinutes: 0,
   pinEnabled: false,
   newPin: '',
   newPinConfirm: ''
@@ -61,7 +63,11 @@ async function onSingleSessionToggle(event: Event): Promise<void> {
   sessionToggleError.value = ''
 
   try {
-    const response = await authSettingsPatch({ singleSessionEnabled: newFlag })
+    const response = await authSettingsPatch(
+      { singleSessionEnabled: newFlag },
+      getAuthSessionToken(),
+      appStore.settings.deviceId
+    )
     if (!response || response.success !== true) {
       throw new Error(response?.error || 'Не удалось обновить настройку сессии')
     }
@@ -81,6 +87,7 @@ function syncFromStore(): void {
   form.theme = appStore.settings.theme
   form.treeTemplate = appStore.settings.treeTemplate
   form.appLockBySession = appStore.settings.appLockBySession
+  form.idleLogoutMinutes = appStore.settings.idleLogoutMinutes
   form.pinEnabled = appStore.settings.pinEnabled
   form.newPin = ''
   form.newPinConfirm = ''
@@ -122,7 +129,8 @@ async function saveSettings(): Promise<void> {
       apiBaseUrl: form.apiBaseUrl.trim() || '/api',
       theme: form.theme,
       treeTemplate: form.treeTemplate,
-      appLockBySession: form.appLockBySession
+      appLockBySession: form.appLockBySession,
+      idleLogoutMinutes: Number(form.idleLogoutMinutes) || 0
     })
 
     const currentlyPinEnabled = appStore.settings.pinEnabled
@@ -247,6 +255,17 @@ async function clearAllData(): Promise<void> {
                 <span class="toggle-track"></span>
                 <span>{{ form.appLockBySession ? 'Включена' : 'Выключена' }}</span>
               </label>
+            </div>
+
+            <div class="field">
+              <label>Авто-выход из сессии</label>
+              <select v-model.number="form.idleLogoutMinutes">
+                <option :value="0">Выключен</option>
+                <option :value="5">Через 5 минут</option>
+                <option :value="15">Через 15 минут</option>
+                <option :value="30">Через 30 минут</option>
+                <option :value="60">Через 1 час</option>
+              </select>
             </div>
           </div>
         </div>

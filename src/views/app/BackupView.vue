@@ -44,7 +44,7 @@ const portableIdentity = computed(() => appStore.portableIdentity)
 const canUseServerBackup = computed(() => Boolean(appStore.settings.deviceId))
 const portableIdentitySummary = computed(() => {
   if (!portableIdentity.value) {
-    return 'Сейчас работает локальная сессия. Чтобы восстанавливать backup на другом ПК, подключите Яндекс ID.'
+    return 'Для резервных копий и переноса между устройствами подключите Яндекс ID или VK ID.'
   }
 
   const providerTitle = portableIdentity.value.provider === 'yandex' ? 'Яндекс ID подключен' : 'VK ID подключён'

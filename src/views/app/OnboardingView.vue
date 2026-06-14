@@ -37,7 +37,7 @@ const privacyPolicyItems = [
   },
   {
     title: 'Перенос между устройствами',
-    text: 'Для переноса backup между ПК и телефоном можно подключить Яндекс ID или VK ID.'
+    text: 'Для доступа и переноса backup между ПК и телефоном требуется подключить Яндекс ID или VK ID.'
   }
 ]
 
@@ -86,6 +86,11 @@ async function nextPage(): Promise<void> {
   if (page.value === 1 && !consent.value) {
     error.value = 'Для продолжения примите политику конфиденциальности.'
     pulseConsent()
+    return
+  }
+
+  if (page.value === 1 && !hasPortableIdentity.value) {
+    error.value = 'Для продолжения подключите Яндекс ID или VK ID.'
     return
   }
 
@@ -217,8 +222,8 @@ async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void>
 
             <template v-else>
               <p class="backup-auth-text">
-                Этот шаг необязателен. Можно подключить внешний вход сейчас или сделать это позже в&nbsp;разделе
-                «Резервные копии».
+                Для продолжения подключите внешний вход. Это защищает приложение от неавторизованного доступа
+                и автоматических запросов.
               </p>
 
               <div class="btn-row backup-auth-actions">
@@ -243,7 +248,7 @@ async function connectPortableIdentity(provider: 'yandex' | 'vk'): Promise<void>
               />
 
               <p class="backup-auth-status muted">
-                Можно пропустить этот шаг и подключить вход позже.
+                Без подключения аккаунта продолжить нельзя.
               </p>
             </template>
 

@@ -404,7 +404,6 @@ onUnmounted(() => {
               <div class="presence-value">{{ stats.presence.total }}</div>
               <div class="presence-meta">
                 <span><AppIcon name="verified_user" :size="14" /> авторизованных: {{ stats.presence.authorized }}</span>
-                <span><AppIcon name="public" :size="14" /> гостей: {{ stats.presence.anonymous }}</span>
               </div>
             </div>
           </div>
@@ -555,7 +554,7 @@ onUnmounted(() => {
                     title="Выбрать всех видимых (кроме админов)"
                   />
                 </th>
-                <th>ID</th>
+                <th>№</th>
                 <th>Имя</th>
                 <th>Email</th>
                 <th>Провайдеры</th>
@@ -568,7 +567,7 @@ onUnmounted(() => {
             </thead>
             <tbody>
               <tr
-                v-for="u in filteredUsers"
+                v-for="(u, index) in filteredUsers"
                 :key="u.id"
                 :class="{ 'row-selected': selectedUserIds.has(u.id) }"
               >
@@ -580,7 +579,7 @@ onUnmounted(() => {
                     @change="toggleUser(u.id)"
                   />
                 </td>
-                <td>{{ u.id }}</td>
+                <td :title="`ID в базе: ${u.id}`">{{ index + 1 }}</td>
                 <td>{{ u.displayName }}</td>
                 <td>{{ u.email || '—' }}</td>
                 <td>

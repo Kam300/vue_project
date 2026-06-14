@@ -224,7 +224,6 @@ export interface AdminStatsResponse {
   presence?: {
     total: number
     authorized: number
-    anonymous: number
     window_seconds: number
   }
   error?: string

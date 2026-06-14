@@ -19,7 +19,6 @@ const authProgressLabel = ref('')
 const authReady = ref(false)
 const authInitBusy = ref(false)
 const logoutBusy = ref(false)
-
 const yandexConfigured = computed(() => Boolean(appStore.authProviders?.yandex?.configured))
 const vkConfigured = computed(() => Boolean(appStore.authProviders?.vk?.configured))
 const hasPortableIdentity = computed(() => Boolean(appStore.portableIdentity))
@@ -157,8 +156,8 @@ onMounted(() => {
         </aside>
 
         <div class="floating-cta-stack">
-          <a class="apk-download-btn" href="/app-debug.apk" download="app-debug.apk">
-            Скачать Android APK
+          <a class="apk-download-btn" href="/Семейное древо.apk" download="Семейное древо.apk">
+            Скачать Семейное древо.apk
           </a>
 
           <RouterLink v-if="!hasPortableIdentity" class="open-app-btn" to="/app/members">
@@ -195,12 +194,31 @@ onMounted(() => {
 }
 
 .portable-auth-box.is-connected {
+  right: 16px;
+  bottom: 92px;
+  width: min(360px, calc(100vw - 32px));
+  padding: 14px;
   border-color: rgba(52, 211, 153, 0.4);
   background: linear-gradient(
     135deg,
     color-mix(in srgb, var(--color-bg-alt) 92%, transparent),
     rgba(52, 211, 153, 0.08)
   );
+}
+
+.portable-auth-box.is-connected .portable-auth-actions {
+  gap: 8px;
+}
+
+.portable-auth-box.is-connected .portable-auth-btn {
+  min-height: 44px;
+  border-radius: 14px;
+  padding: 9px 12px;
+  font-size: 0.86rem;
+}
+
+.portable-auth-box.is-connected .portable-auth-title {
+  font-size: 0.9rem;
 }
 
 .portable-auth-connected {

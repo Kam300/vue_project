@@ -1,11 +1,13 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import AppIcon from '@/components/shared/AppIcon.vue'
 import { healthCheck, listFaces } from '@/services/api'
 import { APP_LOGO_COMPACT_URL } from '@/constants/branding'
+import { useAppStore } from '@/stores/appStore'
 
 const logoIcon = APP_LOGO_COMPACT_URL
+const appStore = useAppStore()
 const apiStatus = ref(null)
 const apiLatency = ref(null)
 const memberCount = ref(0)
@@ -35,6 +37,33 @@ const LOG_ICON_ALIASES = {
   '\u{1F464}': 'person',
   '\u2795': 'add',
   '\u{1F680}': 'rocket_launch'
+}
+
+const themeLabels = {
+  light: 'Светлая',
+  dark: 'Тёмная'
+}
+const themeAnimating = ref(false)
+
+function getEffectiveTheme() {
+  if (appStore.settings.theme === 'light' || appStore.settings.theme === 'dark') {
+    return appStore.settings.theme
+  }
+
+  return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+}
+
+const currentThemeIcon = computed(() => {
+  return getEffectiveTheme() === 'dark' ? 'dark_mode' : 'light_mode'
+})
+
+async function cycleTheme() {
+  if (themeAnimating.value) return
+
+  const nextTheme = getEffectiveTheme() === 'dark' ? 'light' : 'dark'
+  themeAnimating.value = true
+  await appStore.updateSettings({ theme: nextTheme })
+  setTimeout(() => { themeAnimating.value = false }, 500)
 }
 
 function normalizeLogIcon(rawIcon) {
@@ -391,7 +420,7 @@ const techStack = [
     purpose: 'Упрощает вход в web-приложение и помогает связать пользователя с его данными и устройствами.'
   },
 ]
-const androidApkUrl = '/app-debug.apk'
+const androidApkUrl = '/Семейное древо.apk'
 </script>
 
 <template>
@@ -406,9 +435,21 @@ const androidApkUrl = '/app-debug.apk'
     <!-- NAV -->
     <nav class="navbar animate-in">
       <div class="container nav-inner">
-        <div class="nav-brand">
-          <img :src="logoIcon" alt="Логотип Семейного древа" class="nav-logo" width="28" height="28" decoding="async" fetchpriority="high" />
-          <span>Семейное древо</span>
+        <div class="nav-brand-wrap">
+          <div class="nav-brand">
+            <img :src="logoIcon" alt="Логотип Семейного древа" class="nav-logo" width="28" height="28" decoding="async" fetchpriority="high" />
+            <span>Семейное древо</span>
+          </div>
+          <button
+            class="theme-toggle-btn"
+            type="button"
+            @click="cycleTheme"
+            :title="themeLabels[getEffectiveTheme()]"
+            :aria-label="`Переключить тему. Сейчас: ${themeLabels[getEffectiveTheme()]}`"
+            :class="{ spinning: themeAnimating }"
+          >
+            <AppIcon :name="currentThemeIcon" :size="11" />
+          </button>
         </div>
         <div class="nav-links">
           <a href="#features">Возможности</a>
@@ -444,8 +485,7 @@ const androidApkUrl = '/app-debug.apk'
             <a href="#features" class="btn btn-outline">Узнать подробнее</a>
           </div>
           <p class="hero-cta-hint">
-            Хранение в&nbsp;браузере, ничего не&nbsp;нужно регистрировать. Подключите Яндекс ID позже —
-            если захотите перенести данные между устройствами.
+            Вход через Яндекс ID защищает доступ и включает перенос данных между устройствами.
           </p>
           <div class="hero-stats">
             <div class="stat">
@@ -579,9 +619,9 @@ const androidApkUrl = '/app-debug.apk'
             На сайте доступна актуальная Android-сборка
           </h3>
           <p class="project-apk-text">APK собирается из текущего Android-проекта и доступен для прямой загрузки.</p>
-          <a class="btn btn-outline project-apk-link" :href="androidApkUrl" download="app-debug.apk">
+          <a class="btn btn-outline project-apk-link" :href="androidApkUrl" download="Семейное древо.apk">
             <AppIcon name="download" :size="18" />
-            Скачать app-debug.apk
+            Скачать Семейное древо.apk
           </a>
         </article>
       </div>
@@ -687,12 +727,53 @@ const androidApkUrl = '/app-debug.apk'
   display: flex; align-items: center; justify-content: space-between;
   height: 64px;
 }
+.nav-brand-wrap {
+  display: flex; align-items: center; gap: 10px;
+  min-width: 0;
+}
 .nav-brand {
   display: flex; align-items: center; gap: 10px;
   font-weight: 600; font-size: 1.1rem;
   color: var(--color-text);
+  min-width: 0;
 }
 .nav-logo { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
+.theme-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid rgba(124, 92, 252, 0.55);
+  background: rgba(124, 92, 252, 0.12);
+  color: var(--color-accent-light);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast),
+    border-color var(--transition-fast), transform var(--transition-fast),
+    box-shadow var(--transition-fast);
+  flex-shrink: 0;
+}
+.theme-toggle-btn:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+  border-color: var(--color-accent-light);
+  box-shadow: 0 0 18px rgba(124, 92, 252, 0.22);
+  transform: scale(1.06);
+}
+.theme-toggle-btn :deep(.app-icon) {
+  flex-shrink: 0;
+  transition: transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.theme-toggle-btn.spinning :deep(.app-icon) {
+  animation: theme-spin 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes theme-spin {
+  0% { transform: rotate(0deg) scale(0.6); opacity: 0.4; }
+  60% { transform: rotate(200deg) scale(1.15); opacity: 1; }
+  100% { transform: rotate(180deg) scale(1); opacity: 1; }
+}
 .nav-links { display: flex; gap: 28px; }
 .nav-links a {
   color: var(--color-text-secondary); font-size: 0.88rem; font-weight: 500;

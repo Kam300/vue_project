@@ -17,7 +17,8 @@ const SETTINGS_KEYS = {
   apiBaseUrl: 'api_base_url',
   theme: 'theme',
   deviceId: 'device_id',
-  appLockBySession: 'app_lock_by_session'
+  appLockBySession: 'app_lock_by_session',
+  idleLogoutMinutes: 'idle_logout_minutes'
 } as const
 
 export const DEFAULT_APP_SETTINGS: AppSettingsState = {
@@ -29,7 +30,8 @@ export const DEFAULT_APP_SETTINGS: AppSettingsState = {
   apiBaseUrl: import.meta.env.VITE_API_BASE || '/api',
   theme: 'system',
   deviceId: 0,
-  appLockBySession: false
+  appLockBySession: false,
+  idleLogoutMinutes: 0
 }
 
 function parseBoolean(raw: string | undefined, fallback: boolean): boolean {
@@ -79,6 +81,10 @@ export async function getAppSettings(): Promise<AppSettingsState> {
     appLockBySession: parseBoolean(
       map.get(SETTINGS_KEYS.appLockBySession),
       DEFAULT_APP_SETTINGS.appLockBySession
+    ),
+    idleLogoutMinutes: parseNumber(
+      map.get(SETTINGS_KEYS.idleLogoutMinutes),
+      DEFAULT_APP_SETTINGS.idleLogoutMinutes
     )
   }
 }
@@ -98,7 +104,8 @@ export async function patchAppSettings(
     { key: SETTINGS_KEYS.apiBaseUrl, value: next.apiBaseUrl },
     { key: SETTINGS_KEYS.theme, value: next.theme },
     { key: SETTINGS_KEYS.deviceId, value: String(next.deviceId) },
-    { key: SETTINGS_KEYS.appLockBySession, value: String(next.appLockBySession) }
+    { key: SETTINGS_KEYS.appLockBySession, value: String(next.appLockBySession) },
+    { key: SETTINGS_KEYS.idleLogoutMinutes, value: String(next.idleLogoutMinutes) }
   ])
 
   return next
